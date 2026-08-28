@@ -15,7 +15,9 @@ echo "Which LED should indicate the Internet is WORKING?"
 echo "1) Blue  (Default - Green will show 100M port warnings)"
 echo "2) Green (Blue will show 100M port warnings)"
 printf "Enter 1 or 2 [Default: 1]: "
-read -r led_choice
+
+# Read directly from the terminal to support 'curl | bash' execution
+read -r led_choice < /dev/tty
 
 if [ "$led_choice" = "2" ]; then
     LED_NET="green"
@@ -29,29 +31,44 @@ fi
 echo "=========================================="
 echo ""
 
-# 1. Detect Package Manager and Install Dependencies
+# --- Script Location Prompt ---
+echo "=========================================="
+echo " Script Location"
+echo "=========================================="
+printf "Enter full path for the script [Default: /root/led_status.sh]: "
+
+read -r user_script_path < /dev/tty
+
+if [ -z "$user_script_path" ]; then
+    SCRIPT_PATH="/root/led_status.sh"
+else
+    SCRIPT_PATH="$user_script_path"
+fi
+
+# Ensure the target directory exists
+SCRIPT_DIR=$(dirname "$SCRIPT_PATH")
+mkdir -p "$SCRIPT_DIR"
+
+echo "-> Script will be saved to: $SCRIPT_PATH"
+echo "=========================================="
+echo ""
+
+# 1. Install Dependencies (OpenWrt opkg & apk)
 if command -v opkg > /dev/null 2>&1; then
     echo "opkg (OpenWrt classic) detected. Updating..."
     opkg update
     echo "Ensuring coreutils-timeout is installed..."
     opkg install coreutils-timeout
 elif command -v apk > /dev/null 2>&1; then
-    echo "apk (Alpine/OpenWrt APK) detected. Updating..."
+    echo "apk (OpenWrt 24.x+) detected. Updating..."
     apk update
     echo "Ensuring coreutils is installed for the timeout command..."
     apk add coreutils
-elif command -v apt > /dev/null 2>&1; then
-    echo "apt (Debian/Ubuntu) detected. Updating..."
-    apt update
-    apt install -y coreutils iputils-ping cron
 else
-    echo "No standard package manager (opkg/apk/apt) found. Assuming 'timeout' is natively available."
+    echo "Warning: Neither opkg nor apk found. Assuming 'timeout' is natively available."
 fi
 
-# 2. Set Script Path
-SCRIPT_PATH="/root/led_status.sh"
-
-# 3. Write the script payload
+# 2. Write the script payload
 echo "Writing payload to $SCRIPT_PATH..."
 
 # Write the user-selected variables (EOF without quotes evaluates variables)
@@ -120,16 +137,16 @@ else
 fi
 EOF
 
-# 4. Set Permissions
+# 3. Set Permissions
 chmod +x "$SCRIPT_PATH"
 echo "Set $SCRIPT_PATH as executable."
 
-# 5. Apply Crontab Entries
+# 4. Apply Crontab Entries
 echo "Configuring cron schedules..."
 TMP_CRON="/tmp/led_cron_tmp"
 
-# Export existing cron, strip out previous entries of this script to avoid duplicates
-crontab -l 2>/dev/null | grep -v "led_status.sh" > "$TMP_CRON"
+# Export existing cron, strip out previous entries of this exact script to avoid duplicates
+crontab -l 2>/dev/null | grep -v "$SCRIPT_PATH" > "$TMP_CRON"
 
 # Append the new 30-second interval jobs
 echo "* * * * * timeout 25 /bin/sh $SCRIPT_PATH >/dev/null 2>&1" >> "$TMP_CRON"
@@ -139,13 +156,10 @@ echo "* * * * * sleep 30 && timeout 25 /bin/sh $SCRIPT_PATH >/dev/null 2>&1" >> 
 crontab "$TMP_CRON"
 rm "$TMP_CRON"
 
-# Restart cron service based on OS
+# Restart cron service (OpenWrt)
 if [ -x "/etc/init.d/cron" ]; then
     /etc/init.d/cron restart
     echo "Cron service restarted."
-elif [ -x "/etc/init.d/crond" ]; then
-    /etc/init.d/crond restart
-    echo "Crond service restarted."
 fi
 
 echo "Installation complete! The script is now running in the background."
