@@ -35,7 +35,7 @@ echo ""
 echo "=========================================="
 echo " Script Location"
 echo "=========================================="
-printf "Enter full path for the script [Enter for Default: /root/led_status.sh]: "
+printf "Enter full path for the script [Default: /root/led_status.sh]: "
 
 read -r user_script_path < /dev/tty
 
@@ -144,9 +144,10 @@ echo "Set $SCRIPT_PATH as executable."
 # 4. Apply Crontab Entries
 echo "Configuring cron schedules..."
 TMP_CRON="/tmp/led_cron_tmp"
+SCRIPT_NAME=$(basename "$SCRIPT_PATH")
 
-# Export existing cron, strip out previous entries of this exact script to avoid duplicates
-crontab -l 2>/dev/null | grep -v "$SCRIPT_PATH" > "$TMP_CRON"
+# Export existing cron, strip out BOTH the exact path AND any old path sharing the same filename
+crontab -l 2>/dev/null | grep -v "$SCRIPT_PATH" | grep -v "$SCRIPT_NAME" > "$TMP_CRON"
 
 # Append the new 30-second interval jobs
 echo "* * * * * timeout 25 /bin/sh $SCRIPT_PATH >/dev/null 2>&1" >> "$TMP_CRON"
