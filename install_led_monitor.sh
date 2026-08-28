@@ -144,14 +144,18 @@ echo "Set $SCRIPT_PATH as executable."
 # 4. Apply Crontab Entries
 echo "Configuring cron schedules..."
 TMP_CRON="/tmp/led_cron_tmp"
-SCRIPT_NAME=$(basename "$SCRIPT_PATH")
 
-# Export existing cron, strip out BOTH the exact path AND any old path sharing the same filename
-crontab -l 2>/dev/null | grep -v "$SCRIPT_PATH" | grep -v "$SCRIPT_NAME" > "$TMP_CRON"
+# Clean up crontab: 
+# Remove the designated block (for clean future updates) and remove any exact matches of this script path.
+crontab -l 2>/dev/null | \
+  sed '/# --- BEGIN LED MONITOR ---/,/# --- END LED MONITOR ---/d' | \
+  grep -v "$SCRIPT_PATH" > "$TMP_CRON"
 
-# Append the new 30-second interval jobs
+# Append the new, cleanly blocked cron jobs
+echo "# --- BEGIN LED MONITOR ---" >> "$TMP_CRON"
 echo "* * * * * timeout 25 /bin/sh $SCRIPT_PATH >/dev/null 2>&1" >> "$TMP_CRON"
 echo "* * * * * sleep 30 && timeout 25 /bin/sh $SCRIPT_PATH >/dev/null 2>&1" >> "$TMP_CRON"
+echo "# --- END LED MONITOR ---" >> "$TMP_CRON"
 
 # Install new cron and clean up
 crontab "$TMP_CRON"
