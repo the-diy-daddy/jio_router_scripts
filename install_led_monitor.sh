@@ -35,7 +35,7 @@ echo ""
 echo "=========================================="
 echo " Script Location"
 echo "=========================================="
-printf "Enter full path for the script [Default: /root/led_status.sh]: "
+printf "Only Type full path for the script or Hit Enter for [Default: /root/led_status.sh]: "
 
 read -r user_script_path < /dev/tty
 
