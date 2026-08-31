@@ -63,7 +63,7 @@ elif command -v apk > /dev/null 2>&1; then
     echo "apk (OpenWrt 24.x+) detected. Updating..."
     apk update
     echo "Ensuring coreutils is installed for the timeout command..."
-    apk add coreutils
+    apk add coreutils coreutils-timeout
 else
     echo "Warning: Neither opkg nor apk found. Assuming 'timeout' is natively available."
 fi
