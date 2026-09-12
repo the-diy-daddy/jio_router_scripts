@@ -78,8 +78,8 @@ if [ "$mode_choice" = "2" ]; then
     WAN1_NAME=$(echo "$user_wans" | awk '{print $1}')
     WAN2_NAME=$(echo "$user_wans" | awk '{print $2}')
     
-    WAN1_COLOR=$(prompt_color "Color to flash when ONLY [$WAN1_NAME] is active" "1" "1=Blue")
-    WAN2_COLOR=$(prompt_color "Color to flash when ONLY [$WAN2_NAME] is active" "2" "2=Green")
+    WAN1_COLOR=$(prompt_color "Color to FLASH when ONLY [$WAN1_NAME] is active" "1" "1=Blue")
+    WAN2_COLOR=$(prompt_color "Color to FLASH when ONLY [$WAN2_NAME] is active" "2" "2=Green")
     ALL_UP_COLOR=$(prompt_color "Color for SOLID ON when BOTH are active" "5" "5=Cyan")
 else
     MONITOR_MODE="universal"
@@ -99,7 +99,7 @@ if [ "$warn_choice" = "n" ] || [ "$warn_choice" = "N" ]; then
     echo "-> 100M Port Warnings DISABLED."
 else
     ENABLE_WARN=1
-    WARN_COLOR=$(prompt_color "Color to flash for 100M Speed Warning" "3" "3=Red")
+    WARN_COLOR=$(prompt_color "Color to FLASH for 100M Speed Warning" "3" "3=Red")
 fi
 echo "=========================================="
 echo ""
@@ -111,7 +111,7 @@ SCRIPT_PATH="/root/led_status.sh"
 SCRIPT_DIR=$(dirname "$SCRIPT_PATH")
 mkdir -p "$SCRIPT_DIR"
 
-# 2. Clean up default Router Startup LED behaviors (Disables conflicts)
+# 2. Clean up default Router Startup LED behaviors
 echo "Cleaning up default startup LED behaviors to prevent conflicts..."
 
 if [ -f "/etc/init.d/wan-led" ]; then
@@ -193,6 +193,12 @@ set_led() {
     done
 }
 
+# --- Cache mwan3 status to save massive CPU time ---
+MWAN_STATUS=""
+if command -v mwan3 >/dev/null 2>&1; then
+    MWAN_STATUS=$(mwan3 status 2>/dev/null)
+fi
+
 # --- UNIVERSAL CHECK (AP, Repeater, USB, Single WAN) ---
 global_internet_check() {
     if ping -c 1 -W 2 "1.1.1.1" >/dev/null 2>&1; then return 0; fi
@@ -204,16 +210,20 @@ global_internet_check() {
 check_wan() {
     local logical_if="$1"
     
-    # 1. Ask MultiWAN Manager (mwan3) directly to avoid policy routing ping blocks
-    if command -v mwan3 >/dev/null 2>&1; then
-        if mwan3 status 2>/dev/null | grep -q "interface $logical_if is online"; then
+    # 1. Ask MultiWAN Manager (mwan3) memory cache
+    if [ -n "$MWAN_STATUS" ]; then
+        if echo "$MWAN_STATUS" | grep -q "interface $logical_if is online"; then
             return 0
-        elif mwan3 status 2>/dev/null | grep -q "interface $logical_if is offline"; then
+        fi
+        
+        # CRITICAL: If mwan3 knows about this interface, trust it completely.
+        # Do NOT fallback to manual ping, because mwan3 will block it and cause false flashes.
+        if echo "$MWAN_STATUS" | grep -q "interface $logical_if is"; then
             return 1
         fi
     fi
     
-    # 2. Fallback to highly forgiving manual ping
+    # 2. Fallback to manual ping ONLY if mwan3 is NOT managing this interface
     local phys_dev="$logical_if"
     if [ ! -d "/sys/class/net/$logical_if" ]; then
         phys_dev=$(ubus call network.interface.$logical_if status 2>/dev/null | jsonfilter -e '@.l3_device' 2>/dev/null)
@@ -230,10 +240,8 @@ check_wan() {
     fi
     
     if [ -n "$phys_dev" ] && [ -d "/sys/class/net/$phys_dev" ]; then
-        # 3-Strike Rule (1 packet per attempt)
         if ping -c 1 -W 2 -I "$phys_dev" "1.1.1.1" >/dev/null 2>&1; then return 0; fi
         if ping -c 1 -W 2 -I "$phys_dev" "8.8.8.8" >/dev/null 2>&1; then return 0; fi
-        if ping -c 1 -W 2 -I "$phys_dev" "9.9.9.9" >/dev/null 2>&1; then return 0; fi
     fi
     return 1
 }
@@ -276,9 +284,9 @@ else
         fi
     else
         # --- Universal Logic (AP, Repeater, USB, Single, mwan3) ---
-        if command -v mwan3 >/dev/null 2>&1 && [ "$(mwan3 status 2>/dev/null | grep -c 'interface.*is')" -gt 1 ]; then
-            EXPECTED_WANS=$(mwan3 status 2>/dev/null | grep -c "interface.*is")
-            ACTIVE_WANS=$(mwan3 status 2>/dev/null | grep -c "interface.*is online")
+        if [ -n "$MWAN_STATUS" ] && [ "$(echo "$MWAN_STATUS" | grep -c 'interface.*is')" -gt 1 ]; then
+            EXPECTED_WANS=$(echo "$MWAN_STATUS" | grep -c "interface.*is")
+            ACTIVE_WANS=$(echo "$MWAN_STATUS" | grep -c "interface.*is online")
             if [ "$ACTIVE_WANS" -eq "$EXPECTED_WANS" ]; then
                 TARGET_COLOR="$NET_COLOR"; TARGET_MODE="solid"
             elif [ "$ACTIVE_WANS" -gt 0 ]; then
@@ -317,17 +325,17 @@ chmod +x "$SCRIPT_PATH"
 echo "Set $SCRIPT_PATH as executable."
 
 # 6. Apply Crontab Entries
-echo "Configuring cron schedules (3x per minute)..."
+echo "Configuring cron schedules (2x per minute)..."
 TMP_CRON="/tmp/led_cron_tmp"
 
 crontab -l 2>/dev/null | \
   sed '/# --- BEGIN LED MONITOR ---/,/# --- END LED MONITOR ---/d' | \
   grep -v "$SCRIPT_PATH" > "$TMP_CRON"
 
+# Added timeout 25 limit. Reverted to standard 30-second interval to guarantee zero overlaps.
 echo "# --- BEGIN LED MONITOR ---" >> "$TMP_CRON"
-echo "* * * * * timeout 15 /bin/sh $SCRIPT_PATH >/dev/null 2>&1" >> "$TMP_CRON"
-echo "* * * * * sleep 20 && timeout 15 /bin/sh $SCRIPT_PATH >/dev/null 2>&1" >> "$TMP_CRON"
-echo "* * * * * sleep 40 && timeout 15 /bin/sh $SCRIPT_PATH >/dev/null 2>&1" >> "$TMP_CRON"
+echo "* * * * * timeout 25 /bin/sh $SCRIPT_PATH >/dev/null 2>&1" >> "$TMP_CRON"
+echo "* * * * * sleep 30 && timeout 25 /bin/sh $SCRIPT_PATH >/dev/null 2>&1" >> "$TMP_CRON"
 echo "# --- END LED MONITOR ---" >> "$TMP_CRON"
 
 crontab "$TMP_CRON"
@@ -339,4 +347,4 @@ fi
 
 /bin/sh "$SCRIPT_PATH" &
 
-echo "Installation complete! The script is now dynamically monitoring your connection."
+echo "Installation complete! The script is now safely monitoring your connection every 30 seconds."
