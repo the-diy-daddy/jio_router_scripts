@@ -11,15 +11,14 @@ echo ""
 echo "=========================================="
 echo " Installation Options"
 echo "=========================================="
-echo "1) Express Install (Accept all defaults)"
+echo "1) Express Install (Accept all defaults, Single WAN)"
 echo "   - Internet LED: Blue"
 echo "   - 100M Warnings: ENABLED (Green LED)"
 echo "   - Script Path : /root/led_status.sh"
-echo "2) Custom Install  (Choose features and LEDs)"
+echo "2) Custom Install  (Dual WAN, features, and LEDs)"
 echo "3) Cancel / Deny   (Abort installation)"
 printf "Choose an option [1/2/3] (Default: 1): "
 
-# Read directly from the terminal to support 'curl | bash' execution
 read -r install_mode < /dev/tty
 
 if [ "$install_mode" = "3" ]; then
@@ -28,6 +27,39 @@ if [ "$install_mode" = "3" ]; then
     exit 0
 elif [ "$install_mode" = "2" ]; then
     echo ""
+    # --- Dual WAN Prompt ---
+    echo "=========================================="
+    echo " Internet Connection Mode"
+    echo "=========================================="
+    echo "Do you have a Dual WAN setup?"
+    echo "If YES: Solid LED = Both UP | Flashing LED = One UP | Red = Both DOWN"
+    printf "Enable Dual WAN checking? [y/n] (Default: n): "
+    read -r dual_choice < /dev/tty
+
+    if [ "$dual_choice" = "y" ] || [ "$dual_choice" = "Y" ]; then
+        DUAL_WAN=1
+        echo ""
+        echo "Please provide the Linux network interface names for your WANs."
+        echo "(e.g., eth0, eth1, wan, wan2, pppoe-wan)"
+        
+        printf "Enter Primary WAN interface [Default: wan]: "
+        read -r wan1_input < /dev/tty
+        WAN1_IF=${wan1_input:-wan}
+
+        printf "Enter Secondary WAN interface [Default: wan2]: "
+        read -r wan2_input < /dev/tty
+        WAN2_IF=${wan2_input:-wan2}
+        
+        echo "-> Dual WAN ENABLED (Checking $WAN1_IF and $WAN2_IF)"
+    else
+        DUAL_WAN=0
+        WAN1_IF="none"
+        WAN2_IF="none"
+        echo "-> Single WAN mode selected."
+    fi
+    echo "=========================================="
+    echo ""
+
     # --- 100M Warning Prompt ---
     echo "=========================================="
     echo " 100M Port Warning Feature"
@@ -39,49 +71,37 @@ elif [ "$install_mode" = "2" ]; then
     if [ "$warn_choice" = "n" ] || [ "$warn_choice" = "N" ]; then
         ENABLE_WARN=0
         echo "-> 100M Port Warnings DISABLED."
-        echo ""
-        echo "=========================================="
-        echo " LED Configuration"
-        echo "=========================================="
-        echo "Which LED should indicate the Internet is WORKING?"
-        echo "1) Blue"
-        echo "2) Green"
-        printf "Enter 1 or 2 [Default: 1]: "
-        
-        read -r led_choice < /dev/tty
-        
-        if [ "$led_choice" = "2" ]; then
-            LED_NET="green"
-            LED_WARN="blue" # Unused
-            echo "-> Selected: GREEN for Internet."
-        else
-            LED_NET="blue"
-            LED_WARN="green" # Unused
-            echo "-> Selected: BLUE for Internet."
-        fi
     else
         ENABLE_WARN=1
         echo "-> 100M Port Warnings ENABLED."
-        echo ""
-        echo "=========================================="
-        echo " LED Configuration"
-        echo "=========================================="
-        echo "Which LED should indicate the Internet is WORKING?"
+    fi
+    echo "=========================================="
+    echo ""
+
+    # --- LED Configuration Prompt ---
+    echo "=========================================="
+    echo " LED Configuration"
+    echo "=========================================="
+    echo "Which LED should indicate the Internet is WORKING?"
+    if [ "$ENABLE_WARN" -eq 1 ]; then
         echo "1) Blue  (Green will show 100M warnings)"
         echo "2) Green (Blue will show 100M warnings)"
-        printf "Enter 1 or 2 [Default: 1]: "
-        
-        read -r led_choice < /dev/tty
-        
-        if [ "$led_choice" = "2" ]; then
-            LED_NET="green"
-            LED_WARN="blue"
-            echo "-> Selected: GREEN for Internet, BLUE for Warnings."
-        else
-            LED_NET="blue"
-            LED_WARN="green"
-            echo "-> Selected: BLUE for Internet, GREEN for Warnings."
-        fi
+    else
+        echo "1) Blue"
+        echo "2) Green"
+    fi
+    printf "Enter 1 or 2 [Default: 1]: "
+    
+    read -r led_choice < /dev/tty
+    
+    if [ "$led_choice" = "2" ]; then
+        LED_NET="green"
+        LED_WARN="blue"
+        echo "-> Selected: GREEN for Internet."
+    else
+        LED_NET="blue"
+        LED_WARN="green"
+        echo "-> Selected: BLUE for Internet."
     fi
     echo "=========================================="
     echo ""
@@ -104,6 +124,9 @@ elif [ "$install_mode" = "2" ]; then
     echo ""
 else
     # Express Install (Defaults)
+    DUAL_WAN=0
+    WAN1_IF="none"
+    WAN2_IF="none"
     ENABLE_WARN=1
     LED_NET="blue"
     LED_WARN="green"
@@ -174,7 +197,11 @@ cat << EOF > "$SCRIPT_PATH"
 NET_LED="/sys/class/leds/${LED_NET}:status"
 WARN_LED="/sys/class/leds/${LED_WARN}:status"
 DOWN_LED="/sys/class/leds/red:status"
+
 ENABLE_WARN=${ENABLE_WARN}
+DUAL_WAN=${DUAL_WAN}
+WAN1_IF="${WAN1_IF}"
+WAN2_IF="${WAN2_IF}"
 EOF
 
 # Append the rest of the script logic ('EOF' with quotes protects script variables)
@@ -221,19 +248,51 @@ else
     fi
 
     # Check internet connectivity
-    if ping -c 1 -W 3 "$TARGET" > /dev/null 2>&1; then
-        # Internet is WORKING: Clear down, set Net LED to SOLID ON
-        echo none > "$DOWN_LED/trigger"
-        echo 0 > "$DOWN_LED/brightness"
+    if [ "$DUAL_WAN" -eq 1 ]; then
+        # --- DUAL WAN MODE ---
+        WAN1_UP=0
+        WAN2_UP=0
+        
+        # Ping out of specific interfaces to verify their individual links
+        ping -c 1 -W 3 -I "$WAN1_IF" "$TARGET" >/dev/null 2>&1 && WAN1_UP=1
+        ping -c 1 -W 3 -I "$WAN2_IF" "$TARGET" >/dev/null 2>&1 && WAN2_UP=1
+        
+        if [ "$WAN1_UP" -eq 1 ] && [ "$WAN2_UP" -eq 1 ]; then
+            # Both UP: Clear down, set Net LED to SOLID ON
+            echo none > "$DOWN_LED/trigger"
+            echo 0 > "$DOWN_LED/brightness"
 
-        echo none > "$NET_LED/trigger"
-        echo 255 > "$NET_LED/brightness"
+            echo none > "$NET_LED/trigger"
+            echo 255 > "$NET_LED/brightness"
+        elif [ "$WAN1_UP" -eq 1 ] || [ "$WAN2_UP" -eq 1 ]; then
+            # One UP (Failover Mode): Clear down, set Net LED to FLASH (Degraded state)
+            echo none > "$DOWN_LED/trigger"
+            echo 0 > "$DOWN_LED/brightness"
+            
+            echo timer > "$NET_LED/trigger"
+        else
+            # Both DOWN: Clear net, set Down LED to FLASH
+            echo none > "$NET_LED/trigger"
+            echo 0 > "$NET_LED/brightness"
+
+            echo timer > "$DOWN_LED/trigger"
+        fi
     else
-        # Internet is DOWN: Clear net, set Down LED to FLASH
-        echo none > "$NET_LED/trigger"
-        echo 0 > "$NET_LED/brightness"
+        # --- SINGLE WAN MODE ---
+        if ping -c 1 -W 3 "$TARGET" > /dev/null 2>&1; then
+            # Internet is WORKING: Clear down, set Net LED to SOLID ON
+            echo none > "$DOWN_LED/trigger"
+            echo 0 > "$DOWN_LED/brightness"
 
-        echo timer > "$DOWN_LED/trigger"
+            echo none > "$NET_LED/trigger"
+            echo 255 > "$NET_LED/brightness"
+        else
+            # Internet is DOWN: Clear net, set Down LED to FLASH
+            echo none > "$NET_LED/trigger"
+            echo 0 > "$NET_LED/brightness"
+
+            echo timer > "$DOWN_LED/trigger"
+        fi
     fi
 fi
 EOF
