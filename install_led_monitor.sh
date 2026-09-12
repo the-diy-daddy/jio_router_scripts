@@ -359,7 +359,7 @@ chmod +x "$SCRIPT_PATH"
 echo "Set $SCRIPT_PATH as executable."
 
 # 6. Apply Crontab Entries
-echo "Configuring cron schedules..."
+echo "Configuring cron schedules (3x per minute)..."
 TMP_CRON="/tmp/led_cron_tmp"
 
 crontab -l 2>/dev/null | \
@@ -367,8 +367,9 @@ crontab -l 2>/dev/null | \
   grep -v "$SCRIPT_PATH" > "$TMP_CRON"
 
 echo "# --- BEGIN LED MONITOR ---" >> "$TMP_CRON"
-echo "* * * * * timeout 25 /bin/sh $SCRIPT_PATH >/dev/null 2>&1" >> "$TMP_CRON"
-echo "* * * * * sleep 30 && timeout 25 /bin/sh $SCRIPT_PATH >/dev/null 2>&1" >> "$TMP_CRON"
+echo "* * * * * timeout 15 /bin/sh $SCRIPT_PATH >/dev/null 2>&1" >> "$TMP_CRON"
+echo "* * * * * sleep 20 && timeout 15 /bin/sh $SCRIPT_PATH >/dev/null 2>&1" >> "$TMP_CRON"
+echo "* * * * * sleep 40 && timeout 15 /bin/sh $SCRIPT_PATH >/dev/null 2>&1" >> "$TMP_CRON"
 echo "# --- END LED MONITOR ---" >> "$TMP_CRON"
 
 crontab "$TMP_CRON"
@@ -380,4 +381,4 @@ fi
 
 /bin/sh "$SCRIPT_PATH" &
 
-echo "Installation complete! The script is dynamically mixing colors and monitoring your connections."
+echo "Installation complete! The script is dynamically mixing colors and monitoring your connections every 20 seconds."
