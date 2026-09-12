@@ -7,19 +7,48 @@ cd /root || { echo "Failed to change directory to /root. Exiting."; exit 1; }
 echo "Working directory changed to $(pwd)"
 echo ""
 
+# ==========================================
+# 1. INTELLIGENT WAN DETECTION
+# ==========================================
+echo "Detecting WAN interfaces (ignoring VPNs)..."
+DETECTED_WANS=""
+
+# Find all firewall zones that have masquerading enabled (Standard WAN zones)
+for zone in $(uci show firewall 2>/dev/null | grep "\.masq='1'" | cut -d. -f2); do
+    networks=$(uci -q get firewall.$zone.network)
+    for net in $networks; do
+        # Ignore IPv6 duplicate logical interfaces
+        case "$net" in *6) continue ;; esac
+        
+        # Get the actual physical/virtual device (e.g., pppoe-wan)
+        dev=$(ubus call network.interface.$net status 2>/dev/null | jsonfilter -e '@.l3_device' 2>/dev/null)
+        
+        # Fallback if ubus doesn't return l3_device but network name is the device name
+        [ -z "$dev" ] && [ -d "/sys/class/net/$net" ] && dev="$net"
+
+        if [ -n "$dev" ]; then
+            # IGNORE VPN INTERFACES
+            if echo "$dev" | grep -qE '^(wg|tun|tap|tailscale|zerotier|zt)'; then
+                continue
+            fi
+            DETECTED_WANS="$DETECTED_WANS $dev"
+        fi
+    done
+done
+
+# Remove duplicates and clean spaces
+DETECTED_WANS=$(echo "$DETECTED_WANS" | tr ' ' '\n' | sort -u | xargs)
+NUM_WANS=$(echo "$DETECTED_WANS" | wc -w)
+
 # --- Master Installation Menu ---
 echo "=========================================="
 echo " Installation Options"
 echo "=========================================="
-echo "1) Express Install (Accept defaults, Auto Multi-WAN)"
-echo "   - Internet LED: Blue"
-echo "   - 100M Warnings: ENABLED (Green LED)"
-echo "   - Script Path : /root/led_status.sh"
-echo "2) Custom Install  (Choose LEDs and features)"
+echo "1) Express Install (Accept all defaults)"
+echo "2) Custom Install  (Choose Dual-WAN, LEDs, Features)"
 echo "3) Cancel / Deny   (Abort installation)"
 printf "Choose an option [1/2/3] (Default: 1): "
 
-# Read directly from the terminal to support 'curl | bash' execution
 read -r install_mode < /dev/tty
 
 if [ "$install_mode" = "3" ]; then
@@ -28,6 +57,34 @@ if [ "$install_mode" = "3" ]; then
     exit 0
 elif [ "$install_mode" = "2" ]; then
     echo ""
+    # --- Multi-WAN Prompt ---
+    echo "=========================================="
+    echo " Internet Connection Mode"
+    echo "=========================================="
+    if [ "$NUM_WANS" -ge 2 ]; then
+        echo "Detected Multiple WANs: [ $DETECTED_WANS ]"
+        echo "If enabled: Solid LED = All UP | Flashing LED = One UP | Red = All DOWN"
+        printf "Enable Dual/Multi-WAN monitoring for these? [y/n] (Default: y): "
+        read -r dual_choice < /dev/tty
+        
+        if [ -z "$dual_choice" ] || [ "$dual_choice" = "y" ] || [ "$dual_choice" = "Y" ]; then
+            TARGET_WANS="$DETECTED_WANS"
+            echo "-> Multi-WAN Monitoring ENABLED."
+        else
+            TARGET_WANS=""
+            echo "-> Standard Single WAN route tracking selected."
+        fi
+    elif [ "$NUM_WANS" -eq 1 ]; then
+        echo "Detected Single WAN: [ $DETECTED_WANS ]"
+        TARGET_WANS="$DETECTED_WANS"
+        echo "-> Standard Single WAN route tracking selected."
+    else
+        echo "Could not auto-detect physical WANs. Will use default route tracking."
+        TARGET_WANS=""
+    fi
+    echo "=========================================="
+    echo ""
+
     # --- 100M Warning Prompt ---
     echo "=========================================="
     echo " 100M Port Warning Feature"
@@ -39,49 +96,37 @@ elif [ "$install_mode" = "2" ]; then
     if [ "$warn_choice" = "n" ] || [ "$warn_choice" = "N" ]; then
         ENABLE_WARN=0
         echo "-> 100M Port Warnings DISABLED."
-        echo ""
-        echo "=========================================="
-        echo " LED Configuration"
-        echo "=========================================="
-        echo "Which LED should indicate the Internet is WORKING?"
-        echo "1) Blue"
-        echo "2) Green"
-        printf "Enter 1 or 2 [Default: 1]: "
-        
-        read -r led_choice < /dev/tty
-        
-        if [ "$led_choice" = "2" ]; then
-            LED_NET="green"
-            LED_WARN="blue" # Unused
-            echo "-> Selected: GREEN for Internet."
-        else
-            LED_NET="blue"
-            LED_WARN="green" # Unused
-            echo "-> Selected: BLUE for Internet."
-        fi
     else
         ENABLE_WARN=1
         echo "-> 100M Port Warnings ENABLED."
-        echo ""
-        echo "=========================================="
-        echo " LED Configuration"
-        echo "=========================================="
-        echo "Which LED should indicate the Internet is WORKING?"
+    fi
+    echo "=========================================="
+    echo ""
+
+    # --- LED Configuration Prompt ---
+    echo "=========================================="
+    echo " LED Configuration"
+    echo "=========================================="
+    echo "Which LED should indicate the Internet is WORKING?"
+    if [ "$ENABLE_WARN" -eq 1 ]; then
         echo "1) Blue  (Green will show 100M warnings)"
         echo "2) Green (Blue will show 100M warnings)"
-        printf "Enter 1 or 2 [Default: 1]: "
-        
-        read -r led_choice < /dev/tty
-        
-        if [ "$led_choice" = "2" ]; then
-            LED_NET="green"
-            LED_WARN="blue"
-            echo "-> Selected: GREEN for Internet, BLUE for Warnings."
-        else
-            LED_NET="blue"
-            LED_WARN="green"
-            echo "-> Selected: BLUE for Internet, GREEN for Warnings."
-        fi
+    else
+        echo "1) Blue"
+        echo "2) Green"
+    fi
+    printf "Enter 1 or 2 [Default: 1]: "
+    
+    read -r led_choice < /dev/tty
+    
+    if [ "$led_choice" = "2" ]; then
+        LED_NET="green"
+        LED_WARN="blue"
+        echo "-> Selected: GREEN for Internet."
+    else
+        LED_NET="blue"
+        LED_WARN="green"
+        echo "-> Selected: BLUE for Internet."
     fi
     echo "=========================================="
     echo ""
@@ -108,6 +153,14 @@ else
     LED_NET="blue"
     LED_WARN="green"
     SCRIPT_PATH="/root/led_status.sh"
+    
+    # Auto-apply Dual WAN if detected
+    if [ "$NUM_WANS" -ge 2 ]; then
+        TARGET_WANS="$DETECTED_WANS"
+        echo "-> Express: Multi-WAN automatically enabled for [ $TARGET_WANS ]"
+    else
+        TARGET_WANS=""
+    fi
     echo ""
     echo "-> Proceeding with Express Install (Defaults applied)."
     echo ""
@@ -117,10 +170,10 @@ fi
 SCRIPT_DIR=$(dirname "$SCRIPT_PATH")
 mkdir -p "$SCRIPT_DIR"
 
-# 1. Clean up default Router Startup LED behaviors (Disables conflicts)
+# 2. Clean up default Router Startup LED behaviors (Disables conflicts)
 echo "Cleaning up default startup LED behaviors to prevent conflicts..."
 
-# 1A. Permanently neutralize custom /etc/init.d/wan-led script
+# 2A. Permanently neutralize custom /etc/init.d/wan-led script
 if [ -f "/etc/init.d/wan-led" ]; then
     echo "-> Disabling and stopping custom /etc/init.d/wan-led startup script..."
     /etc/init.d/wan-led disable >/dev/null 2>&1
@@ -128,10 +181,8 @@ if [ -f "/etc/init.d/wan-led" ]; then
     
     # Strip executable permissions so the router cannot ever run it again
     chmod -x /etc/init.d/wan-led
-    echo "-> Executable permissions removed from wan-led."
     
     # Override the red LED hardcode left behind by its stop command
-    echo "-> Clearing residual LED states left by wan-led..."
     for color in red green blue; do
         if [ -d "/sys/class/leds/${color}:status" ]; then
             echo none > "/sys/class/leds/${color}:status/trigger" 2>/dev/null
@@ -140,44 +191,40 @@ if [ -f "/etc/init.d/wan-led" ]; then
     done
 fi
 
-# 1B. Remove default OpenWrt UCI configurations that fight for these specific LEDs
+# 2B. Remove default OpenWrt UCI configurations that fight for these specific LEDs
 while uci -q show system | grep -E "\.sysfs='?(blue:status|red:status|green:status)'?" >/dev/null; do
     cfg=$(uci -q show system | grep -E "\.sysfs='?(blue:status|red:status|green:status)'?" | head -n 1 | cut -d. -f2)
-    echo "-> Removing default UCI LED config: system.$cfg"
     uci delete "system.$cfg"
 done
 uci commit system
 /etc/init.d/led reload >/dev/null 2>&1
 
-# 2. Install Dependencies (OpenWrt opkg & apk)
+# 3. Install Dependencies (OpenWrt opkg & apk)
 if command -v opkg > /dev/null 2>&1; then
-    echo "opkg (OpenWrt classic) detected. Updating..."
-    opkg update
-    echo "Ensuring coreutils-timeout is installed..."
-    opkg install coreutils-timeout
+    echo "Updating packages..."
+    opkg update >/dev/null 2>&1
+    opkg install coreutils-timeout >/dev/null 2>&1
 elif command -v apk > /dev/null 2>&1; then
-    echo "apk (OpenWrt 24.x+) detected. Updating..."
-    apk update
-    echo "Ensuring coreutils is installed for the timeout command..."
-    apk add coreutils
-else
-    echo "Warning: Neither opkg nor apk found. Assuming 'timeout' is natively available."
+    apk update >/dev/null 2>&1
+    apk add coreutils >/dev/null 2>&1
 fi
 
-# 3. Write the script payload
+# 4. Write the script payload
 echo "Writing payload to $SCRIPT_PATH..."
 
-# Write the user-selected variables (EOF without quotes evaluates variables)
+# Write the user-selected variables
 cat << EOF > "$SCRIPT_PATH"
 #!/bin/sh
 
 NET_LED="/sys/class/leds/${LED_NET}:status"
 WARN_LED="/sys/class/leds/${LED_WARN}:status"
 DOWN_LED="/sys/class/leds/red:status"
+
 ENABLE_WARN=${ENABLE_WARN}
+TARGET_WANS="${TARGET_WANS}"
 EOF
 
-# Append the rest of the script logic ('EOF' with quotes protects script variables)
+# Append the rest of the script logic
 cat << 'EOF' >> "$SCRIPT_PATH"
 TARGET="1.1.1.1"
 
@@ -220,75 +267,63 @@ else
         echo 0 > "$WARN_LED/brightness"
     fi
 
-    # --- Auto-Detect Multi-WAN vs Single-WAN ---
-    EXPECTED_WANS=0
-    ACTIVE_WANS=0
-
-    # Method 1: Check if mwan3 is installed and tracking interfaces
-    if command -v mwan3 >/dev/null 2>&1; then
-        EXPECTED_WANS=$(mwan3 status 2>/dev/null | grep -E -c "interface.*is")
-        ACTIVE_WANS=$(mwan3 status 2>/dev/null | grep -E -c "interface.*is online")
-    else
-        # Method 2: Native OpenWrt Firewall Zone detection (ubus)
-        wan_zone=$(uci show firewall 2>/dev/null | grep -E "\.name='wan'" | head -n 1 | cut -d. -f2)
-        if [ -n "$wan_zone" ]; then
-            wan_interfaces=$(uci -q get firewall.$wan_zone.network)
-            for iface in $wan_interfaces; do
-                # Ignore duplicate logical tracking for IPv6 (e.g. wan6)
-                case "$iface" in *6) continue ;; esac
-                
-                EXPECTED_WANS=$((EXPECTED_WANS + 1))
-                
-                # Fetch the dynamic physical device (e.g. pppoe-wan, eth1)
-                dev=$(ubus call network.interface.$iface status 2>/dev/null | jsonfilter -e '@.l3_device' 2>/dev/null)
-                
-                if [ -n "$dev" ] && [ -d "/sys/class/net/$dev" ]; then
-                    if ping -c 1 -W 3 -I "$dev" "$TARGET" >/dev/null 2>&1; then
-                        ACTIVE_WANS=$((ACTIVE_WANS + 1))
-                    fi
+    # Check Internet connectivity
+    if [ -n "$TARGET_WANS" ]; then
+        # --- EXPLICIT INTERFACE CHECKING (Dual/Multi WAN) ---
+        EXPECTED_WANS=0
+        ACTIVE_WANS=0
+        
+        for iface in $TARGET_WANS; do
+            EXPECTED_WANS=$((EXPECTED_WANS + 1))
+            # Safely check if interface currently exists in OS (handles temporary PPPoE drops)
+            if [ -d "/sys/class/net/$iface" ]; then
+                if ping -c 1 -W 3 -I "$iface" "$TARGET" >/dev/null 2>&1; then
+                    ACTIVE_WANS=$((ACTIVE_WANS + 1))
                 fi
-            done
-        fi
-    fi
-
-    # Fallback: If no WAN interfaces detected, default to standard single ping check
-    if [ "$EXPECTED_WANS" -eq 0 ]; then
-        EXPECTED_WANS=1
-        if ping -c 1 -W 3 "$TARGET" > /dev/null 2>&1; then
-            ACTIVE_WANS=1
-        fi
-    fi
-
-    # --- Connectivity LED Enforcement ---
-    if [ "$EXPECTED_WANS" -gt 1 ]; then
-        # MULTI-WAN MODE DETECTED
-        if [ "$ACTIVE_WANS" -eq "$EXPECTED_WANS" ]; then
-            # All WANs UP
-            echo none > "$DOWN_LED/trigger"
-            echo 0 > "$DOWN_LED/brightness"
-            echo none > "$NET_LED/trigger"
-            echo 255 > "$NET_LED/brightness"
-        elif [ "$ACTIVE_WANS" -gt 0 ]; then
-            # Degraded / Failover Mode (One UP, One DOWN)
-            echo none > "$DOWN_LED/trigger"
-            echo 0 > "$DOWN_LED/brightness"
-            echo timer > "$NET_LED/trigger"
+            fi
+        done
+        
+        if [ "$EXPECTED_WANS" -gt 1 ]; then
+            if [ "$ACTIVE_WANS" -eq "$EXPECTED_WANS" ]; then
+                # All WANs UP
+                echo none > "$DOWN_LED/trigger"
+                echo 0 > "$DOWN_LED/brightness"
+                echo none > "$NET_LED/trigger"
+                echo 255 > "$NET_LED/brightness"
+            elif [ "$ACTIVE_WANS" -gt 0 ]; then
+                # Degraded / Failover Mode (One UP, One DOWN)
+                echo none > "$DOWN_LED/trigger"
+                echo 0 > "$DOWN_LED/brightness"
+                echo timer > "$NET_LED/trigger"
+            else
+                # All WANs DOWN
+                echo none > "$NET_LED/trigger"
+                echo 0 > "$NET_LED/brightness"
+                echo timer > "$DOWN_LED/trigger"
+            fi
         else
-            # All WANs DOWN
-            echo none > "$NET_LED/trigger"
-            echo 0 > "$NET_LED/brightness"
-            echo timer > "$DOWN_LED/trigger"
+            # Single Interface fallback behavior
+            if [ "$ACTIVE_WANS" -gt 0 ]; then
+                echo none > "$DOWN_LED/trigger"
+                echo 0 > "$DOWN_LED/brightness"
+                echo none > "$NET_LED/trigger"
+                echo 255 > "$NET_LED/brightness"
+            else
+                echo none > "$NET_LED/trigger"
+                echo 0 > "$NET_LED/brightness"
+                echo timer > "$DOWN_LED/trigger"
+            fi
         fi
     else
-        # SINGLE WAN MODE DETECTED
-        if [ "$ACTIVE_WANS" -gt 0 ]; then
-            # Internet UP
+        # --- STANDARD ROUTING CHECK ---
+        if ping -c 1 -W 3 "$TARGET" > /dev/null 2>&1; then
+            # Internet is WORKING
             echo none > "$DOWN_LED/trigger"
             echo 0 > "$DOWN_LED/brightness"
             echo none > "$NET_LED/trigger"
             echo 255 > "$NET_LED/brightness"
         else
-            # Internet DOWN
+            # Internet is DOWN
             echo none > "$NET_LED/trigger"
             echo 0 > "$NET_LED/brightness"
             echo timer > "$DOWN_LED/trigger"
@@ -297,37 +332,32 @@ else
 fi
 EOF
 
-# 4. Set Permissions
+# 5. Set Permissions
 chmod +x "$SCRIPT_PATH"
 echo "Set $SCRIPT_PATH as executable."
 
-# 5. Apply Crontab Entries
+# 6. Apply Crontab Entries
 echo "Configuring cron schedules..."
 TMP_CRON="/tmp/led_cron_tmp"
 
-# Clean up crontab: 
-# Remove the designated block (for clean future updates) and remove any exact matches of this script path.
 crontab -l 2>/dev/null | \
   sed '/# --- BEGIN LED MONITOR ---/,/# --- END LED MONITOR ---/d' | \
   grep -v "$SCRIPT_PATH" > "$TMP_CRON"
 
-# Append the new, cleanly blocked cron jobs
 echo "# --- BEGIN LED MONITOR ---" >> "$TMP_CRON"
 echo "* * * * * timeout 25 /bin/sh $SCRIPT_PATH >/dev/null 2>&1" >> "$TMP_CRON"
 echo "* * * * * sleep 30 && timeout 25 /bin/sh $SCRIPT_PATH >/dev/null 2>&1" >> "$TMP_CRON"
 echo "# --- END LED MONITOR ---" >> "$TMP_CRON"
 
-# Install new cron and clean up
 crontab "$TMP_CRON"
 rm "$TMP_CRON"
 
-# Restart cron service (OpenWrt)
+# Restart cron service
 if [ -x "/etc/init.d/cron" ]; then
-    /etc/init.d/cron restart
-    echo "Cron service restarted."
+    /etc/init.d/cron restart >/dev/null 2>&1
 fi
 
-# Run it once immediately to set the correct state without waiting 30 seconds
+# Run it once immediately
 /bin/sh "$SCRIPT_PATH" &
 
-echo "Installation complete! The script is dynamically monitoring your WAN setup in the background."
+echo "Installation complete! The script is now running in the background."
