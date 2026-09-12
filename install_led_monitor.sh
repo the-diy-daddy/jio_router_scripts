@@ -78,8 +78,8 @@ if [ "$mode_choice" = "2" ]; then
     WAN1_NAME=$(echo "$user_wans" | awk '{print $1}')
     WAN2_NAME=$(echo "$user_wans" | awk '{print $2}')
     
-    WAN1_COLOR=$(prompt_color "Color when ONLY [$WAN1_NAME] is active" "1" "1=Blue")
-    WAN2_COLOR=$(prompt_color "Color when ONLY [$WAN2_NAME] is active" "2" "2=Green")
+    WAN1_COLOR=$(prompt_color "Color to flash when ONLY [$WAN1_NAME] is active" "1" "1=Blue")
+    WAN2_COLOR=$(prompt_color "Color to flash when ONLY [$WAN2_NAME] is active" "2" "2=Green")
     ALL_UP_COLOR=$(prompt_color "Color for SOLID ON when BOTH are active" "5" "5=Cyan")
 else
     MONITOR_MODE="universal"
