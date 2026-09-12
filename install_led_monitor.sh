@@ -195,16 +195,26 @@ set_led() {
 
 # --- UNIVERSAL CHECK (AP, Repeater, USB, Single WAN) ---
 global_internet_check() {
-    if ping -c 2 -W 2 "1.1.1.1" >/dev/null 2>&1; then return 0; fi
-    if ping -c 2 -W 2 "8.8.8.8" >/dev/null 2>&1; then return 0; fi
+    if ping -c 1 -W 2 "1.1.1.1" >/dev/null 2>&1; then return 0; fi
+    if ping -c 1 -W 2 "8.8.8.8" >/dev/null 2>&1; then return 0; fi
     return 1
 }
 
 # --- STRICT DUAL-WAN CHECK (Interface Specific) ---
 check_wan() {
     local logical_if="$1"
-    local phys_dev="$logical_if"
     
+    # 1. Ask MultiWAN Manager (mwan3) directly to avoid policy routing ping blocks
+    if command -v mwan3 >/dev/null 2>&1; then
+        if mwan3 status 2>/dev/null | grep -q "interface $logical_if is online"; then
+            return 0
+        elif mwan3 status 2>/dev/null | grep -q "interface $logical_if is offline"; then
+            return 1
+        fi
+    fi
+    
+    # 2. Fallback to highly forgiving manual ping
+    local phys_dev="$logical_if"
     if [ ! -d "/sys/class/net/$logical_if" ]; then
         phys_dev=$(ubus call network.interface.$logical_if status 2>/dev/null | jsonfilter -e '@.l3_device' 2>/dev/null)
         [ -z "$phys_dev" ] && phys_dev=$(ubus call network.interface.$logical_if status 2>/dev/null | jsonfilter -e '@.device' 2>/dev/null)
@@ -220,8 +230,10 @@ check_wan() {
     fi
     
     if [ -n "$phys_dev" ] && [ -d "/sys/class/net/$phys_dev" ]; then
-        if ping -c 2 -W 2 -I "$phys_dev" "1.1.1.1" >/dev/null 2>&1; then return 0; fi
-        if ping -c 2 -W 2 -I "$phys_dev" "8.8.8.8" >/dev/null 2>&1; then return 0; fi
+        # 3-Strike Rule (1 packet per attempt)
+        if ping -c 1 -W 2 -I "$phys_dev" "1.1.1.1" >/dev/null 2>&1; then return 0; fi
+        if ping -c 1 -W 2 -I "$phys_dev" "8.8.8.8" >/dev/null 2>&1; then return 0; fi
+        if ping -c 1 -W 2 -I "$phys_dev" "9.9.9.9" >/dev/null 2>&1; then return 0; fi
     fi
     return 1
 }
