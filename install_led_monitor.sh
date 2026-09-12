@@ -7,41 +7,6 @@ cd /root || { echo "Failed to change directory to /root. Exiting."; exit 1; }
 echo "Working directory changed to $(pwd)"
 echo ""
 
-# ==========================================
-# 1. INTELLIGENT LIVE WAN DETECTION
-# ==========================================
-echo "Detecting live WAN interfaces (ignoring VPNs)..."
-DETECTED_WANS=""
-LIVE_INFO=""
-
-for zone in $(uci show firewall 2>/dev/null | grep "\.masq='1'" | cut -d. -f2); do
-    networks=$(uci -q get firewall.$zone.network)
-    for net in $networks; do
-        case "$net" in *6|loopback) continue ;; esac
-        
-        # Aggressive VPN Name & Protocol Filter
-        if echo "$net" | grep -qiE '(vpn|wg|tun|tap|tailscale|zerotier|zt)'; then continue; fi
-        proto=$(uci -q get network.$net.proto 2>/dev/null)
-        if echo "$proto" | grep -qiE '(wireguard|openvpn|tun|tap)'; then continue; fi
-        
-        # Add to tracking list
-        DETECTED_WANS="$DETECTED_WANS $net"
-        
-        # Fetch Live Connection Info via Ubus
-        is_up=$(ubus call network.interface.$net status 2>/dev/null | jsonfilter -e '@.up' 2>/dev/null)
-        ip_addr=$(ubus call network.interface.$net status 2>/dev/null | jsonfilter -e '@["ipv4-address"][0].address' 2>/dev/null)
-        
-        status_text="DOWN"
-        [ "$is_up" = "true" ] && status_text="UP"
-        [ -n "$ip_addr" ] && status_text="$status_text, IP: $ip_addr"
-        
-        LIVE_INFO="$LIVE_INFO  - $net: $status_text\n"
-    done
-done
-
-DETECTED_WANS=$(echo "$DETECTED_WANS" | tr ' ' '\n' | sort -u | xargs)
-[ -z "$DETECTED_WANS" ] && DETECTED_WANS="wan"
-
 # Color Prompt Helper Function
 prompt_color() {
     local p_text="$1"
@@ -58,109 +23,89 @@ prompt_color() {
 
 # --- Master Installation Menu ---
 echo "=========================================="
-echo " Installation Options"
+echo " Connection & Monitoring Mode"
 echo "=========================================="
-echo "1) Express Install (Accept all defaults)"
-echo "2) Custom Install  (Choose 7-Color LED mapping, WANs, etc.)"
-echo "3) Cancel / Deny   (Abort installation)"
+echo "1) Universal Mode (Auto-Pilot)"
+echo "   -> Best for Single WAN, Access Points, Repeaters, & USB Tethering."
+echo "   -> Automatically supports mwan3 Multi-WAN if installed."
+echo ""
+echo "2) Strict Dual-WAN Mode"
+echo "   -> Assign specific LED colors to specific WAN interfaces."
+echo ""
+echo "3) Cancel / Abort"
 printf "Choose an option [1/2/3] (Default: 1): "
+read -r mode_choice < /dev/tty
+[ -z "$mode_choice" ] && mode_choice="1"
 
-read -r install_mode < /dev/tty
+if [ "$mode_choice" = "3" ]; then
+    echo "Installation cancelled. Exiting."
+    exit 0
+fi
 
-# Initialize defaults
-WAN1=""
-WAN2=""
-WAN1_COLOR="blue"
-WAN2_COLOR="green"
-ALL_UP_COLOR="cyan"
+# Initialize default vars
+MONITOR_MODE="universal"
+WAN1_NAME=""; WAN2_NAME=""
+WAN1_COLOR="blue"; WAN2_COLOR="green"; ALL_UP_COLOR="cyan"
 NET_COLOR="blue"
 ENABLE_WARN=1
 WARN_COLOR="red"
 
-if [ "$install_mode" = "3" ]; then
-    echo ""
-    echo "Installation cancelled by user. Exiting."
-    exit 0
-elif [ "$install_mode" = "2" ]; then
-    echo ""
-    # --- Multi-WAN Prompt ---
-    echo "=========================================="
-    echo " Live Internet Connection Status"
-    echo "=========================================="
-    printf "%b" "$LIVE_INFO"
-    echo ""
-    echo "Type the names of the interfaces you want to monitor, separated by space."
-    printf "WANs to monitor [Default: $DETECTED_WANS]: "
+echo ""
+echo "=========================================="
+echo " LED Color Configuration"
+echo "=========================================="
+if [ "$mode_choice" = "2" ]; then
+    MONITOR_MODE="strict_dual"
     
+    echo "Detecting WAN interfaces (ignoring VPNs)..."
+    DETECTED_WANS=""
+    for zone in $(uci show firewall 2>/dev/null | grep "\.masq='1'" | cut -d. -f2); do
+        for net in $(uci -q get firewall.$zone.network); do
+            case "$net" in *6|loopback) continue ;; esac
+            if echo "$net" | grep -qiE '(vpn|wg|tun|tap|tailscale|zerotier|zt)'; then continue; fi
+            if echo "$(uci -q get network.$net.proto)" | grep -qiE '(wireguard|openvpn|tun|tap)'; then continue; fi
+            DETECTED_WANS="$DETECTED_WANS $net"
+        done
+    done
+    DETECTED_WANS=$(echo "$DETECTED_WANS" | tr ' ' '\n' | sort -u | xargs)
+    [ -z "$DETECTED_WANS" ] && DETECTED_WANS="wan wanb"
+    
+    echo "Detected WANs: [ $DETECTED_WANS ]"
+    printf "Type the two WAN interfaces to monitor (e.g. 'wan wanb'): "
     read -r user_wans < /dev/tty
-    [ -n "$user_wans" ] && TARGET_WANS="$user_wans" || TARGET_WANS="$DETECTED_WANS"
+    [ -z "$user_wans" ] && user_wans="$DETECTED_WANS"
     
-    NUM_WANS=$(echo "$TARGET_WANS" | wc -w)
-    echo "=========================================="
-    echo ""
+    WAN1_NAME=$(echo "$user_wans" | awk '{print $1}')
+    WAN2_NAME=$(echo "$user_wans" | awk '{print $2}')
     
-    # --- Color Mapping ---
-    echo "=========================================="
-    echo " Advanced LED Color Configuration"
-    echo "=========================================="
-    if [ "$NUM_WANS" -eq 2 ]; then
-        WAN1=$(echo "$TARGET_WANS" | awk '{print $1}')
-        WAN2=$(echo "$TARGET_WANS" | awk '{print $2}')
-        
-        echo "Dual WAN detected. Let's map your LEDs."
-        WAN1_COLOR=$(prompt_color "Color to flash when ONLY [$WAN1] is active" "1" "1=Blue")
-        WAN2_COLOR=$(prompt_color "Color to flash when ONLY [$WAN2] is active" "2" "2=Green")
-        ALL_UP_COLOR=$(prompt_color "Color for SOLID ON when BOTH are active" "5" "5=Cyan")
-        
-        echo "-> $WAN1 = $WAN1_COLOR | $WAN2 = $WAN2_COLOR | Both = $ALL_UP_COLOR"
-    else
-        NET_COLOR=$(prompt_color "Which LED color should indicate the Internet is WORKING?" "1" "1=Blue")
-        echo "-> Selected: $NET_COLOR for Internet."
-    fi
-    echo "=========================================="
-    echo ""
-
-    # --- 100M Warning Prompt ---
-    echo "=========================================="
-    echo " 100M Port Warning Feature"
-    echo "=========================================="
-    printf "Enable 100M port warning? [y/n] (Default: y): "
-    read -r warn_choice < /dev/tty
-
-    if [ "$warn_choice" = "n" ] || [ "$warn_choice" = "N" ]; then
-        ENABLE_WARN=0
-        echo "-> 100M Port Warnings DISABLED."
-    else
-        ENABLE_WARN=1
-        WARN_COLOR=$(prompt_color "Color to flash for 100M Speed Warning" "3" "3=Red")
-        echo "-> 100M Port Warnings ENABLED ($WARN_COLOR)."
-    fi
-    echo "=========================================="
-    echo ""
-
-    # --- Script Location Prompt ---
-    echo "=========================================="
-    echo " Script Location"
-    echo "=========================================="
-    printf "Enter full path for the script [Default: /root/led_status.sh]: "
-    read -r user_script_path < /dev/tty
-    [ -z "$user_script_path" ] && SCRIPT_PATH="/root/led_status.sh" || SCRIPT_PATH="$user_script_path"
-    echo "-> Script will be saved to: $SCRIPT_PATH"
-    echo "=========================================="
-    echo ""
+    WAN1_COLOR=$(prompt_color "Color when ONLY [$WAN1_NAME] is active" "1" "1=Blue")
+    WAN2_COLOR=$(prompt_color "Color when ONLY [$WAN2_NAME] is active" "2" "2=Green")
+    ALL_UP_COLOR=$(prompt_color "Color for SOLID ON when BOTH are active" "5" "5=Cyan")
 else
-    # Express Install (Defaults)
-    TARGET_WANS="$DETECTED_WANS"
-    NUM_WANS=$(echo "$TARGET_WANS" | wc -w)
-    if [ "$NUM_WANS" -eq 2 ]; then
-        WAN1=$(echo "$TARGET_WANS" | awk '{print $1}')
-        WAN2=$(echo "$TARGET_WANS" | awk '{print $2}')
-    fi
-    SCRIPT_PATH="/root/led_status.sh"
-    echo ""
-    echo "-> Proceeding with Express Install for WANs: [ $TARGET_WANS ]"
-    echo ""
+    MONITOR_MODE="universal"
+    NET_COLOR=$(prompt_color "Which LED color should indicate the Internet is WORKING?" "1" "1=Blue")
 fi
+echo "=========================================="
+echo ""
+
+# --- 100M Warning Prompt ---
+echo "=========================================="
+echo " 100M Port Warning Feature"
+echo "=========================================="
+printf "Enable 100M port warning? [y/n] (Default: y): "
+read -r warn_choice < /dev/tty
+if [ "$warn_choice" = "n" ] || [ "$warn_choice" = "N" ]; then
+    ENABLE_WARN=0
+    echo "-> 100M Port Warnings DISABLED."
+else
+    ENABLE_WARN=1
+    WARN_COLOR=$(prompt_color "Color to flash for 100M Speed Warning" "3" "3=Red")
+fi
+echo "=========================================="
+echo ""
+
+# --- Script Location Prompt ---
+SCRIPT_PATH="/root/led_status.sh"
 
 # Ensure the target directory exists
 SCRIPT_DIR=$(dirname "$SCRIPT_PATH")
@@ -170,7 +115,6 @@ mkdir -p "$SCRIPT_DIR"
 echo "Cleaning up default startup LED behaviors to prevent conflicts..."
 
 if [ -f "/etc/init.d/wan-led" ]; then
-    echo "-> Neutralizing custom /etc/init.d/wan-led startup script..."
     /etc/init.d/wan-led disable >/dev/null 2>&1
     /etc/init.d/wan-led stop >/dev/null 2>&1
     chmod -x /etc/init.d/wan-led
@@ -192,7 +136,6 @@ uci commit system
 
 # 3. Install Dependencies
 if command -v opkg > /dev/null 2>&1; then
-    echo "Updating packages..."
     opkg update >/dev/null 2>&1
     opkg install coreutils-timeout >/dev/null 2>&1
 elif command -v apk > /dev/null 2>&1; then
@@ -206,10 +149,9 @@ echo "Writing payload to $SCRIPT_PATH..."
 cat << EOF > "$SCRIPT_PATH"
 #!/bin/sh
 # --- User Configured Variables ---
-TARGET_WANS="${TARGET_WANS}"
-NUM_WANS=${NUM_WANS}
-WAN1_NAME="${WAN1}"
-WAN2_NAME="${WAN2}"
+MONITOR_MODE="${MONITOR_MODE}"
+WAN1_NAME="${WAN1_NAME}"
+WAN2_NAME="${WAN2_NAME}"
 WAN1_COLOR="${WAN1_COLOR}"
 WAN2_COLOR="${WAN2_COLOR}"
 ALL_UP_COLOR="${ALL_UP_COLOR}"
@@ -229,13 +171,9 @@ set_led() {
     
     local r=0; local g=0; local b=0
     case "$color" in
-        red) r=1 ;;
-        green) g=1 ;;
-        blue) b=1 ;;
-        yellow|amber) r=1; g=1 ;;
-        cyan) g=1; b=1 ;;
-        magenta|purple) r=1; b=1 ;;
-        white) r=1; g=1; b=1 ;;
+        red) r=1 ;; green) g=1 ;; blue) b=1 ;;
+        yellow|amber) r=1; g=1 ;; cyan) g=1; b=1 ;;
+        magenta|purple) r=1; b=1 ;; white) r=1; g=1; b=1 ;;
     esac
     
     for c in red green blue; do
@@ -255,7 +193,14 @@ set_led() {
     done
 }
 
-# 3-Strike Helper function to reliably ping a logical WAN interface
+# --- UNIVERSAL CHECK (AP, Repeater, USB, Single WAN) ---
+global_internet_check() {
+    if ping -c 2 -W 2 "1.1.1.1" >/dev/null 2>&1; then return 0; fi
+    if ping -c 2 -W 2 "8.8.8.8" >/dev/null 2>&1; then return 0; fi
+    return 1
+}
+
+# --- STRICT DUAL-WAN CHECK (Interface Specific) ---
 check_wan() {
     local logical_if="$1"
     local phys_dev="$logical_if"
@@ -275,9 +220,8 @@ check_wan() {
     fi
     
     if [ -n "$phys_dev" ] && [ -d "/sys/class/net/$phys_dev" ]; then
-        if ping -c 1 -W 2 -I "$phys_dev" "1.1.1.1" >/dev/null 2>&1; then return 0; fi
-        if ping -c 1 -W 2 -I "$phys_dev" "8.8.8.8" >/dev/null 2>&1; then return 0; fi
-        if ping -c 1 -W 2 -I "$phys_dev" "9.9.9.9" >/dev/null 2>&1; then return 0; fi
+        if ping -c 2 -W 2 -I "$phys_dev" "1.1.1.1" >/dev/null 2>&1; then return 0; fi
+        if ping -c 2 -W 2 -I "$phys_dev" "8.8.8.8" >/dev/null 2>&1; then return 0; fi
     fi
     return 1
 }
@@ -296,60 +240,63 @@ if [ "$ENABLE_WARN" -eq 1 ]; then
     done
 fi
 
-# Clear all LEDs cleanly before applying new state
-for c in blue green red; do
-    echo none > "/sys/class/leds/$c:status/trigger" 2>/dev/null
-    echo 0 > "/sys/class/leds/$c:status/brightness" 2>/dev/null
-done
+TARGET_COLOR="red"
+TARGET_MODE="flash"
 
 if [ "$PORT_WARNING" -eq 1 ]; then
-    # CRITICAL SPEED DROP
-    set_led "$WARN_COLOR" "flash"
+    TARGET_COLOR="$WARN_COLOR"
+    TARGET_MODE="flash"
 else
-    # --- Dual WAN Exact Mapping ---
-    if [ "$NUM_WANS" -eq 2 ] && [ -n "$WAN1_NAME" ] && [ -n "$WAN2_NAME" ]; then
-        WAN1_UP=0
-        WAN2_UP=0
-        
+    if [ "$MONITOR_MODE" = "strict_dual" ]; then
+        # --- Strict Dual WAN Logic ---
+        WAN1_UP=0; WAN2_UP=0
         check_wan "$WAN1_NAME" && WAN1_UP=1
         check_wan "$WAN2_NAME" && WAN2_UP=1
         
         if [ "$WAN1_UP" -eq 1 ] && [ "$WAN2_UP" -eq 1 ]; then
-            set_led "$ALL_UP_COLOR" "solid"
+            TARGET_COLOR="$ALL_UP_COLOR"; TARGET_MODE="solid"
         elif [ "$WAN1_UP" -eq 1 ]; then
-            set_led "$WAN1_COLOR" "flash"
+            TARGET_COLOR="$WAN1_COLOR"; TARGET_MODE="flash"
         elif [ "$WAN2_UP" -eq 1 ]; then
-            set_led "$WAN2_COLOR" "flash"
+            TARGET_COLOR="$WAN2_COLOR"; TARGET_MODE="flash"
         else
-            set_led "red" "flash"
+            TARGET_COLOR="red"; TARGET_MODE="flash"
         fi
-        
-    # --- Generic Single / 3+ WAN Mapping ---
     else
-        EXPECTED_WANS=0
-        ACTIVE_WANS=0
-        
-        for logical_if in $TARGET_WANS; do
-            EXPECTED_WANS=$((EXPECTED_WANS + 1))
-            check_wan "$logical_if" && ACTIVE_WANS=$((ACTIVE_WANS + 1))
-        done
-        
-        if [ "$EXPECTED_WANS" -gt 0 ]; then
+        # --- Universal Logic (AP, Repeater, USB, Single, mwan3) ---
+        if command -v mwan3 >/dev/null 2>&1 && [ "$(mwan3 status 2>/dev/null | grep -c 'interface.*is')" -gt 1 ]; then
+            EXPECTED_WANS=$(mwan3 status 2>/dev/null | grep -c "interface.*is")
+            ACTIVE_WANS=$(mwan3 status 2>/dev/null | grep -c "interface.*is online")
             if [ "$ACTIVE_WANS" -eq "$EXPECTED_WANS" ]; then
-                set_led "$NET_COLOR" "solid"
+                TARGET_COLOR="$NET_COLOR"; TARGET_MODE="solid"
             elif [ "$ACTIVE_WANS" -gt 0 ]; then
-                set_led "$NET_COLOR" "flash"
+                TARGET_COLOR="$NET_COLOR"; TARGET_MODE="flash"
             else
-                set_led "red" "flash"
+                TARGET_COLOR="red"; TARGET_MODE="flash"
             fi
         else
-            if ping -c 1 -W 2 "1.1.1.1" >/dev/null 2>&1 || ping -c 1 -W 2 "8.8.8.8" >/dev/null 2>&1; then
-                set_led "$NET_COLOR" "solid"
+            if global_internet_check; then
+                TARGET_COLOR="$NET_COLOR"; TARGET_MODE="solid"
             else
-                set_led "red" "flash"
+                TARGET_COLOR="red"; TARGET_MODE="flash"
             fi
         fi
     fi
+fi
+
+# --- STATE MEMORY: Only update hardware if the state actually changed ---
+STATE_FILE="/tmp/router_led_state"
+NEW_STATE="${TARGET_COLOR}_${TARGET_MODE}"
+OLD_STATE=$(cat "$STATE_FILE" 2>/dev/null)
+
+if [ "$NEW_STATE" != "$OLD_STATE" ]; then
+    for c in blue green red; do
+        echo none > "/sys/class/leds/$c:status/trigger" 2>/dev/null
+        echo 0 > "/sys/class/leds/$c:status/brightness" 2>/dev/null
+    done
+    
+    set_led "$TARGET_COLOR" "$TARGET_MODE"
+    echo "$NEW_STATE" > "$STATE_FILE"
 fi
 EOF
 
@@ -380,4 +327,4 @@ fi
 
 /bin/sh "$SCRIPT_PATH" &
 
-echo "Installation complete! The script is dynamically mixing colors and monitoring your connections every 20 seconds."
+echo "Installation complete! The script is now dynamically monitoring your connection."
