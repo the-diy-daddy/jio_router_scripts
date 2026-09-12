@@ -220,7 +220,6 @@ EOF
 
 cat << 'EOF' >> "$SCRIPT_PATH"
 # --- Core Logic ---
-TARGET="1.1.1.1"
 PORT_WARNING=0
 
 # Hardware RGB mixing function
@@ -256,7 +255,7 @@ set_led() {
     done
 }
 
-# Helper function to reliably ping a logical WAN interface
+# 3-Strike Helper function to reliably ping a logical WAN interface
 check_wan() {
     local logical_if="$1"
     local phys_dev="$logical_if"
@@ -276,9 +275,9 @@ check_wan() {
     fi
     
     if [ -n "$phys_dev" ] && [ -d "/sys/class/net/$phys_dev" ]; then
-        if ping -c 1 -W 3 -I "$phys_dev" "$TARGET" >/dev/null 2>&1; then
-            return 0
-        fi
+        if ping -c 1 -W 2 -I "$phys_dev" "1.1.1.1" >/dev/null 2>&1; then return 0; fi
+        if ping -c 1 -W 2 -I "$phys_dev" "8.8.8.8" >/dev/null 2>&1; then return 0; fi
+        if ping -c 1 -W 2 -I "$phys_dev" "9.9.9.9" >/dev/null 2>&1; then return 0; fi
     fi
     return 1
 }
@@ -344,7 +343,7 @@ else
                 set_led "red" "flash"
             fi
         else
-            if ping -c 1 -W 3 "$TARGET" >/dev/null 2>&1; then
+            if ping -c 1 -W 2 "1.1.1.1" >/dev/null 2>&1 || ping -c 1 -W 2 "8.8.8.8" >/dev/null 2>&1; then
                 set_led "$NET_COLOR" "solid"
             else
                 set_led "red" "flash"
