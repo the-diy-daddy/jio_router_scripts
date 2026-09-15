@@ -197,7 +197,7 @@ log() {
     echo "$(date '+%Y-%m-%d %H:%M:%S') | $1" >> "$LOG_FILE"
 }
 
-# 5MB Log Rotation Check (5,242,880 bytes)
+# 5MB Log Rotation Check
 if [ -f "$LOG_FILE" ]; then
     FILE_SIZE=$(wc -c < "$LOG_FILE" 2>/dev/null | awk '{print $1}')
     if [ -n "$FILE_SIZE" ] && [ "$FILE_SIZE" -gt 5242880 ]; then
@@ -251,14 +251,19 @@ fi
 # --- UNIVERSAL CHECK (Global Ping Only) ---
 global_internet_check() {
     log "Performing global Universal internet check..."
-    if ping -c 1 -W 2 "1.1.1.1" >/dev/null 2>&1; then 
-        log "Global ping to 1.1.1.1: SUCCESS"
-        return 0
-    fi
-    if ping -c 1 -W 2 "8.8.8.8" >/dev/null 2>&1; then 
-        log "Global ping to 8.8.8.8: SUCCESS"
-        return 0
-    fi
+    
+    # Pass 1
+    if ping -c 1 -W 2 "1.1.1.1" >/dev/null 2>&1; then log "Ping to 1.1.1.1: SUCCESS"; return 0; fi
+    if ping -c 1 -W 2 "8.8.8.8" >/dev/null 2>&1; then log "Ping to 8.8.8.8: SUCCESS"; return 0; fi
+    
+    # Micro-drop protection
+    log "Pass 1 failed. Waiting 2 seconds for micro-drop recovery..."
+    sleep 2
+    
+    # Pass 2
+    if ping -c 1 -W 2 "9.9.9.9" >/dev/null 2>&1; then log "Retry ping to 9.9.9.9: SUCCESS"; return 0; fi
+    if ping -c 1 -W 2 "1.1.1.1" >/dev/null 2>&1; then log "Retry ping to 1.1.1.1: SUCCESS"; return 0; fi
+    
     log "Global ping checks: FAILED"
     return 1
 }
@@ -300,21 +305,23 @@ check_wan() {
     
     if [ -n "$phys_dev" ] && [ -d "/sys/class/net/$phys_dev" ]; then
         log " -> Physical device resolved as [$phys_dev]. Executing manual ping test..."
-        if ping -c 1 -W 2 -I "$phys_dev" "1.1.1.1" >/dev/null 2>&1; then 
-            log " -> Ping 1.1.1.1 via [$phys_dev]: SUCCESS"
-            return 0
-        fi
-        if ping -c 1 -W 2 -I "$phys_dev" "8.8.8.8" >/dev/null 2>&1; then 
-            log " -> Ping 8.8.8.8 via [$phys_dev]: SUCCESS"
-            return 0
-        fi
+        
+        # Pass 1
+        if ping -c 1 -W 2 -I "$phys_dev" "1.1.1.1" >/dev/null 2>&1; then log " -> Ping 1.1.1.1 via [$phys_dev]: SUCCESS"; return 0; fi
+        if ping -c 1 -W 2 -I "$phys_dev" "8.8.8.8" >/dev/null 2>&1; then log " -> Ping 8.8.8.8 via [$phys_dev]: SUCCESS"; return 0; fi
+        
+        # Micro-drop protection
+        log " -> Pass 1 failed. Waiting 2s for micro-drop recovery..."
+        sleep 2
+        
+        # Pass 2
+        if ping -c 1 -W 2 -I "$phys_dev" "9.9.9.9" >/dev/null 2>&1; then log " -> Retry Ping 9.9.9.9 via [$phys_dev]: SUCCESS"; return 0; fi
+        if ping -c 1 -W 2 -I "$phys_dev" "1.1.1.1" >/dev/null 2>&1; then log " -> Retry Ping 1.1.1.1 via [$phys_dev]: SUCCESS"; return 0; fi
+        
         log " -> Ping checks via [$phys_dev]: FAILED"
     else
         log " -> Could not resolve physical device for [$logical_if]. Attempting generic ping fallback..."
-        if ping -c 1 -W 2 "1.1.1.1" >/dev/null 2>&1; then 
-            log " -> Generic fallback ping: SUCCESS"
-            return 0
-        fi
+        if ping -c 1 -W 2 "1.1.1.1" >/dev/null 2>&1; then log " -> Generic fallback ping: SUCCESS"; return 0; fi
     fi
     
     log " -> Interface [$logical_if] determined to be OFFLINE."
