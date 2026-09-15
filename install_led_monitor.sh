@@ -7,18 +7,26 @@ cd /root || { echo "Failed to change directory to /root. Exiting."; exit 1; }
 echo "Working directory changed to $(pwd)"
 echo ""
 
-# Color Prompt Helper Function
+# Strict Color Prompt Helper Function
 prompt_color() {
     local p_text="$1"
     local d_val="$2"
     local d_name="$3"
-    printf "%s\n[1=Blue 2=Green 3=Red 4=Yellow 5=Cyan 6=Magenta 7=White] (Default: %s): " "$p_text" "$d_name" >&2
-    read -r c < /dev/tty
-    [ -z "$c" ] && c=$d_val
-    case "$c" in
-        1) echo "blue" ;; 2) echo "green" ;; 3) echo "red" ;; 4) echo "yellow" ;;
-        5) echo "cyan" ;; 6) echo "magenta" ;; 7) echo "white" ;; *) echo "blue" ;;
-    esac
+    while true; do
+        printf "%s\n[1=Blue 2=Green 3=Red 4=Yellow 5=Cyan 6=Magenta 7=White] (Default: %s): " "$p_text" "$d_name" >&2
+        read -r c < /dev/tty
+        [ -z "$c" ] && c=$d_val
+        case "$c" in
+            1) echo "blue"; break ;;
+            2) echo "green"; break ;;
+            3) echo "red"; break ;;
+            4) echo "yellow"; break ;;
+            5) echo "cyan"; break ;;
+            6) echo "magenta"; break ;;
+            7) echo "white"; break ;;
+            *) printf "Invalid choice. Please enter a number from 1 to 7.\n\n" >&2 ;;
+        esac
+    done
 }
 
 # --- Master Installation Menu ---
@@ -33,9 +41,16 @@ echo "2) Strict Dual-WAN Mode"
 echo "   -> Assign specific LED colors to specific WAN interfaces."
 echo ""
 echo "3) Cancel / Abort"
-printf "Choose an option [1/2/3] (Default: 1): "
-read -r mode_choice < /dev/tty
-[ -z "$mode_choice" ] && mode_choice="1"
+
+while true; do
+    printf "Choose an option [1/2/3] (Default: 1): "
+    read -r mode_choice < /dev/tty
+    [ -z "$mode_choice" ] && mode_choice="1"
+    case "$mode_choice" in
+        1|2|3) break ;;
+        *) echo "Invalid option. Please enter 1, 2, or 3." ;;
+    esac
+done
 
 if [ "$mode_choice" = "3" ]; then
     echo "Installation cancelled. Exiting."
@@ -92,15 +107,26 @@ echo ""
 echo "=========================================="
 echo " 100M Port Warning Feature"
 echo "=========================================="
-printf "Enable 100M port warning? [y/n] (Default: y): "
-read -r warn_choice < /dev/tty
-if [ "$warn_choice" = "n" ] || [ "$warn_choice" = "N" ]; then
-    ENABLE_WARN=0
-    echo "-> 100M Port Warnings DISABLED."
-else
-    ENABLE_WARN=1
-    WARN_COLOR=$(prompt_color "Color to FLASH for 100M Speed Warning" "3" "3=Red")
-fi
+while true; do
+    printf "Enable 100M port warning? [y/n] (Default: y): "
+    read -r warn_choice < /dev/tty
+    [ -z "$warn_choice" ] && warn_choice="y"
+    case "$warn_choice" in
+        [Yy]*)
+            ENABLE_WARN=1
+            WARN_COLOR=$(prompt_color "Color to FLASH for 100M Speed Warning" "3" "3=Red")
+            break
+            ;;
+        [Nn]*)
+            ENABLE_WARN=0
+            echo "-> 100M Port Warnings DISABLED."
+            break
+            ;;
+        *)
+            echo "Invalid input. Please enter 'y' for Yes or 'n' for No."
+            ;;
+    esac
+done
 echo "=========================================="
 echo ""
 
