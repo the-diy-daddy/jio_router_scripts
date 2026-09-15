@@ -158,11 +158,29 @@ ALL_UP_COLOR="${ALL_UP_COLOR}"
 NET_COLOR="${NET_COLOR}"
 ENABLE_WARN=${ENABLE_WARN}
 WARN_COLOR="${WARN_COLOR}"
+LOG_FILE="${SCRIPT_PATH}.log"
 EOF
 
 cat << 'EOF' >> "$SCRIPT_PATH"
 # --- Core Logic ---
 PORT_WARNING=0
+
+# System Logging Setup
+log() {
+    echo "$(date '+%Y-%m-%d %H:%M:%S') | $1" >> "$LOG_FILE"
+}
+
+# 5MB Log Rotation Check (5,242,880 bytes)
+if [ -f "$LOG_FILE" ]; then
+    FILE_SIZE=$(wc -c < "$LOG_FILE" 2>/dev/null | awk '{print $1}')
+    if [ -n "$FILE_SIZE" ] && [ "$FILE_SIZE" -gt 5242880 ]; then
+        tail -n 2000 "$LOG_FILE" > "${LOG_FILE}.tmp"
+        mv "${LOG_FILE}.tmp" "$LOG_FILE"
+        log "[SYSTEM] Log file truncated to prevent exceeding 5MB limit."
+    fi
+fi
+
+log "--- Starting LED Monitor Check ---"
 
 # Hardware RGB mixing function
 set_led() {
@@ -185,6 +203,9 @@ set_led() {
         if [ "$c_val" -eq 1 ]; then
             if [ "$state" = "flash" ]; then
                 echo timer > "/sys/class/leds/$c:status/trigger" 2>/dev/null
+                echo 255 > "/sys/class/leds/$c:status/brightness" 2>/dev/null
+                echo 500 > "/sys/class/leds/$c:status/delay_on" 2>/dev/null
+                echo 500 > "/sys/class/leds/$c:status/delay_off" 2>/dev/null
             elif [ "$state" = "solid" ]; then
                 echo none > "/sys/class/leds/$c:status/trigger" 2>/dev/null
                 echo 255 > "/sys/class/leds/$c:status/brightness" 2>/dev/null
@@ -197,28 +218,39 @@ set_led() {
 MWAN_STATUS=""
 if command -v mwan3 >/dev/null 2>&1; then
     MWAN_STATUS=$(mwan3 status 2>/dev/null)
+    [ -n "$MWAN_STATUS" ] && log "Captured mwan3 status cache."
 fi
 
 # --- UNIVERSAL CHECK (AP, Repeater, USB, Single WAN) ---
 global_internet_check() {
-    if ping -c 1 -W 2 "1.1.1.1" >/dev/null 2>&1; then return 0; fi
-    if ping -c 1 -W 2 "8.8.8.8" >/dev/null 2>&1; then return 0; fi
+    log "Performing global Universal internet check..."
+    if ping -c 1 -W 2 "1.1.1.1" >/dev/null 2>&1; then 
+        log "Global ping to 1.1.1.1: SUCCESS"
+        return 0
+    fi
+    if ping -c 1 -W 2 "8.8.8.8" >/dev/null 2>&1; then 
+        log "Global ping to 8.8.8.8: SUCCESS"
+        return 0
+    fi
+    log "Global ping checks: FAILED"
     return 1
 }
 
 # --- STRICT DUAL-WAN CHECK (Interface Specific) ---
 check_wan() {
     local logical_if="$1"
+    log "Checking interface: [$logical_if]"
     
-    # 1. Ask MultiWAN Manager (mwan3) memory cache
+    # 1. Ask MultiWAN Manager (mwan3) memory cache (Case Insensitive)
     if [ -n "$MWAN_STATUS" ]; then
-        if echo "$MWAN_STATUS" | grep -q "interface $logical_if is online"; then
+        if echo "$MWAN_STATUS" | grep -qi "interface $logical_if is online"; then
+            log " -> mwan3 reports [$logical_if] is ONLINE. (Skipping manual ping)"
             return 0
         fi
         
-        # CRITICAL: If mwan3 knows about this interface, trust it completely.
-        # Do NOT fallback to manual ping, because mwan3 will block it and cause false flashes.
-        if echo "$MWAN_STATUS" | grep -q "interface $logical_if is"; then
+        # If mwan3 knows about this interface but it's offline, trust it completely.
+        if echo "$MWAN_STATUS" | grep -qi "interface $logical_if is"; then
+            log " -> mwan3 reports [$logical_if] is OFFLINE. (Skipping manual ping)"
             return 1
         fi
     fi
@@ -240,9 +272,25 @@ check_wan() {
     fi
     
     if [ -n "$phys_dev" ] && [ -d "/sys/class/net/$phys_dev" ]; then
-        if ping -c 1 -W 2 -I "$phys_dev" "1.1.1.1" >/dev/null 2>&1; then return 0; fi
-        if ping -c 1 -W 2 -I "$phys_dev" "8.8.8.8" >/dev/null 2>&1; then return 0; fi
+        log " -> Physical device resolved as [$phys_dev]. Executing manual ping test..."
+        if ping -c 1 -W 2 -I "$phys_dev" "1.1.1.1" >/dev/null 2>&1; then 
+            log " -> Ping 1.1.1.1 via [$phys_dev]: SUCCESS"
+            return 0
+        fi
+        if ping -c 1 -W 2 -I "$phys_dev" "8.8.8.8" >/dev/null 2>&1; then 
+            log " -> Ping 8.8.8.8 via [$phys_dev]: SUCCESS"
+            return 0
+        fi
+        log " -> Ping checks via [$phys_dev]: FAILED"
+    else
+        log " -> Could not resolve physical device for [$logical_if]. Attempting generic ping fallback..."
+        if ping -c 1 -W 2 "1.1.1.1" >/dev/null 2>&1; then 
+            log " -> Generic fallback ping: SUCCESS"
+            return 0
+        fi
     fi
+    
+    log " -> Interface [$logical_if] determined to be OFFLINE."
     return 1
 }
 
@@ -253,6 +301,7 @@ if [ "$ENABLE_WARN" -eq 1 ]; then
             SPEED=$(cat "/sys/class/net/$port/speed" 2>/dev/null)
             OPERSTATE=$(cat "/sys/class/net/$port/operstate" 2>/dev/null)
             if [ "$OPERSTATE" = "up" ] && [ "$SPEED" = "100" ]; then
+                log "WARNING: Port [$port] degraded to 100Mbps."
                 PORT_WARNING=1
                 break
             fi
@@ -266,27 +315,33 @@ TARGET_MODE="flash"
 if [ "$PORT_WARNING" -eq 1 ]; then
     TARGET_COLOR="$WARN_COLOR"
     TARGET_MODE="flash"
+    log "Decision: Enforcing 100M Port Warning Override ($WARN_COLOR flash)."
 else
     if [ "$MONITOR_MODE" = "strict_dual" ]; then
-        # --- Strict Dual WAN Logic ---
+        log "Evaluating Strict Dual-WAN Rules..."
         WAN1_UP=0; WAN2_UP=0
         check_wan "$WAN1_NAME" && WAN1_UP=1
         check_wan "$WAN2_NAME" && WAN2_UP=1
         
         if [ "$WAN1_UP" -eq 1 ] && [ "$WAN2_UP" -eq 1 ]; then
             TARGET_COLOR="$ALL_UP_COLOR"; TARGET_MODE="solid"
+            log "Decision: Both WANs UP ($ALL_UP_COLOR solid)."
         elif [ "$WAN1_UP" -eq 1 ]; then
             TARGET_COLOR="$WAN1_COLOR"; TARGET_MODE="flash"
+            log "Decision: Only WAN1 [$WAN1_NAME] UP ($WAN1_COLOR flash)."
         elif [ "$WAN2_UP" -eq 1 ]; then
             TARGET_COLOR="$WAN2_COLOR"; TARGET_MODE="flash"
+            log "Decision: Only WAN2 [$WAN2_NAME] UP ($WAN2_COLOR flash)."
         else
             TARGET_COLOR="red"; TARGET_MODE="flash"
+            log "Decision: ALL WANs DOWN (Red flash)."
         fi
     else
-        # --- Universal Logic (AP, Repeater, USB, Single, mwan3) ---
-        if [ -n "$MWAN_STATUS" ] && [ "$(echo "$MWAN_STATUS" | grep -c 'interface.*is')" -gt 1 ]; then
-            EXPECTED_WANS=$(echo "$MWAN_STATUS" | grep -c "interface.*is")
-            ACTIVE_WANS=$(echo "$MWAN_STATUS" | grep -c "interface.*is online")
+        log "Evaluating Universal Rules..."
+        if [ -n "$MWAN_STATUS" ] && [ "$(echo "$MWAN_STATUS" | grep -ci 'interface.*is')" -gt 1 ]; then
+            EXPECTED_WANS=$(echo "$MWAN_STATUS" | grep -ci "interface.*is")
+            ACTIVE_WANS=$(echo "$MWAN_STATUS" | grep -ci "interface.*is online")
+            log "mwan3 tracking: $ACTIVE_WANS out of $EXPECTED_WANS interfaces online."
             if [ "$ACTIVE_WANS" -eq "$EXPECTED_WANS" ]; then
                 TARGET_COLOR="$NET_COLOR"; TARGET_MODE="solid"
             elif [ "$ACTIVE_WANS" -gt 0 ]; then
@@ -294,11 +349,14 @@ else
             else
                 TARGET_COLOR="red"; TARGET_MODE="flash"
             fi
+            log "Decision: Applied mwan3 rule ($TARGET_COLOR $TARGET_MODE)."
         else
             if global_internet_check; then
                 TARGET_COLOR="$NET_COLOR"; TARGET_MODE="solid"
+                log "Decision: Internet OK ($NET_COLOR solid)."
             else
                 TARGET_COLOR="red"; TARGET_MODE="flash"
+                log "Decision: Internet DOWN (Red flash)."
             fi
         fi
     fi
@@ -310,6 +368,7 @@ NEW_STATE="${TARGET_COLOR}_${TARGET_MODE}"
 OLD_STATE=$(cat "$STATE_FILE" 2>/dev/null)
 
 if [ "$NEW_STATE" != "$OLD_STATE" ]; then
+    log "State Change Detected: [$OLD_STATE] -> [$NEW_STATE]. Updating hardware LEDs..."
     for c in blue green red; do
         echo none > "/sys/class/leds/$c:status/trigger" 2>/dev/null
         echo 0 > "/sys/class/leds/$c:status/brightness" 2>/dev/null
@@ -317,6 +376,9 @@ if [ "$NEW_STATE" != "$OLD_STATE" ]; then
     
     set_led "$TARGET_COLOR" "$TARGET_MODE"
     echo "$NEW_STATE" > "$STATE_FILE"
+    log "Hardware LEDs updated successfully."
+else
+    log "State Unchanged: [$NEW_STATE]. Hardware LEDs skipped."
 fi
 EOF
 
@@ -332,7 +394,6 @@ crontab -l 2>/dev/null | \
   sed '/# --- BEGIN LED MONITOR ---/,/# --- END LED MONITOR ---/d' | \
   grep -v "$SCRIPT_PATH" > "$TMP_CRON"
 
-# Added timeout 25 limit. Reverted to standard 30-second interval to guarantee zero overlaps.
 echo "# --- BEGIN LED MONITOR ---" >> "$TMP_CRON"
 echo "* * * * * timeout 25 /bin/sh $SCRIPT_PATH >/dev/null 2>&1" >> "$TMP_CRON"
 echo "* * * * * sleep 30 && timeout 25 /bin/sh $SCRIPT_PATH >/dev/null 2>&1" >> "$TMP_CRON"
@@ -348,3 +409,4 @@ fi
 /bin/sh "$SCRIPT_PATH" &
 
 echo "Installation complete! The script is now safely monitoring your connection every 30 seconds."
+echo "You can check the logs at any time by running: cat ${SCRIPT_PATH}.log"
