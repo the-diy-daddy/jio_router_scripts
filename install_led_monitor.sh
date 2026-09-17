@@ -46,24 +46,23 @@ else
     echo ""
 fi
 
-# Strict Color Prompt Helper Function
+# Strict Color Prompt Helper Function (Red is removed and reserved)
 prompt_color() {
     local p_text="$1"
     local d_val="$2"
     local d_name="$3"
     while true; do
-        printf "%s\n[1=Blue 2=Green 3=Red 4=Yellow 5=Cyan 6=Magenta 7=White] (Default: %s): " "$p_text" "$d_name" >&2
+        printf "%s\n[1=Blue 2=Green 4=Yellow 5=Cyan 6=Magenta 7=White] (Default: %s): " "$p_text" "$d_name" >&2
         read -r c < /dev/tty
         [ -z "$c" ] && c=$d_val
         case "$c" in
             1) echo "blue"; break ;;
             2) echo "green"; break ;;
-            3) echo "red"; break ;;
             4) echo "yellow"; break ;;
             5) echo "cyan"; break ;;
             6) echo "magenta"; break ;;
             7) echo "white"; break ;;
-            *) printf "Invalid choice. Please enter a number from 1 to 7.\n\n" >&2 ;;
+            *) printf "Invalid choice. Please enter 1, 2, 4, 5, 6, or 7 (Red is reserved for connection failures).\n\n" >&2 ;;
         esac
     done
 }
@@ -103,7 +102,7 @@ WAN1_NAME=""; WAN2_NAME=""
 WAN1_COLOR="blue"; WAN2_COLOR="green"; ALL_UP_COLOR="cyan"
 NET_COLOR="blue"
 ENABLE_WARN=1
-WARN_COLOR="red"
+WARN_COLOR="yellow"
 
 echo ""
 echo "=========================================="
@@ -154,7 +153,7 @@ while true; do
     case "$warn_choice" in
         [Yy]*)
             ENABLE_WARN=1
-            WARN_COLOR=$(prompt_color "Color to FLASH for 100M Speed Warning" "3" "3=Red")
+            WARN_COLOR=$(prompt_color "Color to FLASH for 100M Speed Warning" "4" "4=Yellow")
             break
             ;;
         [Nn]*)
@@ -475,6 +474,4 @@ fi
 /bin/sh "$SCRIPT_PATH" &
 
 echo "Installation complete! The script is now safely monitoring your connection every 30 seconds."
-echo "====================================================================="
 echo "You can check the logs at any time by running: cat ${SCRIPT_PATH}.log"
-echo "====================================================================="
