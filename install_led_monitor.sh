@@ -1,11 +1,10 @@
 #!/bin/sh
 
-# Ensure the installer itself has the correct PATH to find opkg, apk, and core utilities
+# Ensure the installer itself has the correct PATH
 export PATH="/usr/sbin:/usr/bin:/sbin:/bin:$PATH"
 
 echo "Starting LED Status Monitor Installation..."
 
-# Change directory to /root
 cd /root || { echo "Failed to change directory to /root. Exiting."; exit 1; }
 echo "Working directory changed to $(pwd)"
 echo ""
@@ -14,7 +13,7 @@ echo ""
 # 1. PRE-FLIGHT PACKAGE VERIFICATION
 # ==========================================
 echo "Verifying required packages..."
-if ! command -v timeout > /dev/null 2>&1 && [ ! -x "/usr/bin/timeout" ]; then
+if ! command -v timeout > /dev/null 2>&1 && [ ! -x "/usr/bin/timeout" ] && [ ! -x "/bin/timeout" ]; then
     echo "-> 'timeout' utility is missing. Attempting to install 'coreutils-timeout'..."
     echo "--- Package Manager Output ---"
     
@@ -27,26 +26,23 @@ if ! command -v timeout > /dev/null 2>&1 && [ ! -x "/usr/bin/timeout" ]; then
     fi
     
     echo "------------------------------"
-    # Refresh the terminal's command cache so it sees the newly installed binary
     hash -r 2>/dev/null
 fi
 
-# Strict validation check
-if ! command -v timeout > /dev/null 2>&1 && [ ! -x "/usr/bin/timeout" ]; then
+if ! command -v timeout > /dev/null 2>&1 && [ ! -x "/usr/bin/timeout" ] && [ ! -x "/bin/timeout" ]; then
     echo ""
     echo "=========================================="
     echo " CRITICAL ERROR: Package Installation Failed"
     echo "=========================================="
     echo "The script requires the 'timeout' utility."
-    echo "Please check the package manager output above for errors."
     echo "Aborting installation to protect router stability."
     exit 1
 else
-    echo "-> All required packages are present and verified."
+    echo "-> 'timeout' utility is present and verified."
     echo ""
 fi
 
-# Strict Color Prompt Helper Function (Red is removed and reserved)
+# Strict Color Prompt (Red is reserved for connection failures)
 prompt_color() {
     local p_text="$1"
     local d_val="$2"
@@ -62,7 +58,7 @@ prompt_color() {
             5) echo "cyan"; break ;;
             6) echo "magenta"; break ;;
             7) echo "white"; break ;;
-            *) printf "Invalid choice. Please enter 1, 2, 4, 5, 6, or 7 (Red is reserved for connection failures).\n\n" >&2 ;;
+            *) printf "Invalid choice. Please enter 1, 2, 4, 5, 6, or 7 (Red is reserved).\n\n" >&2 ;;
         esac
     done
 }
@@ -142,7 +138,6 @@ fi
 echo "=========================================="
 echo ""
 
-# --- 100M Warning Prompt ---
 echo "=========================================="
 echo " 100M Port Warning Feature"
 echo "=========================================="
@@ -169,29 +164,47 @@ done
 echo "=========================================="
 echo ""
 
-# --- Script Location Prompt ---
 SCRIPT_PATH="/root/led_status.sh"
-
-# Ensure the target directory exists
 SCRIPT_DIR=$(dirname "$SCRIPT_PATH")
 mkdir -p "$SCRIPT_DIR"
 
-# 2. Clean up default Router Startup LED behaviors
-echo "Cleaning up default startup LED behaviors to prevent conflicts..."
+# ==========================================
+# 2. DYNAMIC ROGUE DAEMON HUNTER-KILLER
+# ==========================================
+echo "Hunting down and neutralizing rogue LED hijackers..."
 
-if [ -f "/etc/init.d/wan-led" ]; then
-    /etc/init.d/wan-led disable >/dev/null 2>&1
-    /etc/init.d/wan-led stop >/dev/null 2>&1
-    chmod -x /etc/init.d/wan-led
+# Strategy A: Eradicate based on suspicious service names
+for svc in /etc/init.d/*led*; do
+    if [ -f "$svc" ] && [ "$(basename "$svc")" != "led" ]; then
+        echo " -> Neutralized suspicious service by name: $(basename "$svc")"
+        "$svc" stop >/dev/null 2>&1
+        "$svc" disable >/dev/null 2>&1
+        chmod -x "$svc"
+    fi
+done
+
+# Strategy B: Deep-scan all remaining services for hidden LED binaries
+for f in /etc/init.d/*; do
+    [ -f "$f" ] || continue
+    [ "$(basename "$f")" = "led" ] && continue
     
-    for color in red green blue; do
-        if [ -d "/sys/class/leds/${color}:status" ]; then
-            echo none > "/sys/class/leds/${color}:status/trigger" 2>/dev/null
-            echo 0 > "/sys/class/leds/${color}:status/brightness" 2>/dev/null
+    # Look for the binary this service attempts to launch
+    PROCD_CMD=$(grep "procd_set_param command" "$f" | awk -F'command ' '{print $2}' | tr -d "'" | tr -d '"' | awk '{print $1}')
+    if [ -n "$PROCD_CMD" ] && [ -f "$PROCD_CMD" ]; then
+        # Scan the actual source/binary for hardware LED manipulation
+        if grep -q "/sys/class/leds" "$PROCD_CMD"; then
+            echo " -> Neutralized rogue binary: $(basename "$PROCD_CMD") (Spawned by $(basename "$f"))"
+            "$f" stop >/dev/null 2>&1
+            "$f" disable >/dev/null 2>&1
+            chmod -x "$f"
+            chmod -x "$PROCD_CMD"
+            killall -9 "$(basename "$PROCD_CMD")" >/dev/null 2>&1
         fi
-    done
-fi
+    fi
+done
 
+# Strategy C: Erase standard UCI LED bindings
+echo "Clearing out OpenWrt native UCI bindings..."
 while uci -q show system | grep -E "\.sysfs='?(blue:status|red:status|green:status)'?" >/dev/null; do
     cfg=$(uci -q show system | grep -E "\.sysfs='?(blue:status|red:status|green:status)'?" | head -n 1 | cut -d. -f2)
     uci delete "system.$cfg"
@@ -199,7 +212,17 @@ done
 uci commit system
 /etc/init.d/led reload >/dev/null 2>&1
 
-# 3. Write the script payload
+# Strategy D: Power down all LEDs for a clean slate
+for color in red green blue; do
+    if [ -d "/sys/class/leds/${color}:status" ]; then
+        echo none > "/sys/class/leds/${color}:status/trigger" 2>/dev/null
+        echo 0 > "/sys/class/leds/${color}:status/brightness" 2>/dev/null
+    fi
+done
+
+# ==========================================
+# 3. WRITE THE PAYLOAD
+# ==========================================
 echo "Writing payload to $SCRIPT_PATH..."
 
 cat << EOF > "$SCRIPT_PATH"
@@ -216,13 +239,12 @@ NET_COLOR="${NET_COLOR}"
 ENABLE_WARN=${ENABLE_WARN}
 WARN_COLOR="${WARN_COLOR}"
 LOG_FILE="${SCRIPT_PATH}.log"
+PID_FILE="/tmp/led_monitor.pid"
 EOF
 
 cat << 'EOF' >> "$SCRIPT_PATH"
-# --- Core Logic ---
 PORT_WARNING=0
 
-# System Logging Setup
 log() {
     echo "$(date '+%Y-%m-%d %H:%M:%S') | $1" >> "$LOG_FILE"
 }
@@ -237,14 +259,24 @@ if [ -f "$LOG_FILE" ]; then
     fi
 fi
 
+# NATIVE OVERLAP PROTECTION (No external packages required)
+if [ -f "$PID_FILE" ]; then
+    OLD_PID=$(cat "$PID_FILE" 2>/dev/null)
+    if [ -n "$OLD_PID" ] && [ -d "/proc/$OLD_PID" ]; then
+        log "[WARNING] Previous check (PID $OLD_PID) is still running. Skipping this run to prevent CPU overlap."
+        exit 0
+    fi
+fi
+echo $$ > "$PID_FILE"
+trap 'rm -f "$PID_FILE"' EXIT INT TERM
+
 log "--- Starting LED Monitor Check ---"
 
-# Hardware RGB mixing function
 set_led() {
     local color="$1"
-    local state="$2" # solid, flash
-    
+    local state="$2"
     local r=0; local g=0; local b=0
+    
     case "$color" in
         red) r=1 ;; green) g=1 ;; blue) b=1 ;;
         yellow|amber) r=1; g=1 ;; cyan) g=1; b=1 ;;
@@ -271,53 +303,41 @@ set_led() {
     done
 }
 
-# --- Cache mwan3 status to save massive CPU time (STRICT MODE ONLY) ---
 MWAN_STATUS=""
 if [ "$MONITOR_MODE" = "strict_dual" ] && command -v mwan3 >/dev/null 2>&1; then
     MWAN_STATUS=$(mwan3 status 2>/dev/null)
     [ -n "$MWAN_STATUS" ] && log "Captured mwan3 status cache."
 fi
 
-# --- UNIVERSAL CHECK (Global Ping Only) ---
 global_internet_check() {
     log "Performing global Universal internet check..."
-    
-    # Pass 1
     if ping -c 1 -W 2 "1.1.1.1" >/dev/null 2>&1; then log "Ping to 1.1.1.1: SUCCESS"; return 0; fi
     if ping -c 1 -W 2 "8.8.8.8" >/dev/null 2>&1; then log "Ping to 8.8.8.8: SUCCESS"; return 0; fi
     
-    # Micro-drop protection
     log "Pass 1 failed. Waiting 2 seconds for micro-drop recovery..."
     sleep 2
     
-    # Pass 2
     if ping -c 1 -W 2 "9.9.9.9" >/dev/null 2>&1; then log "Retry ping to 9.9.9.9: SUCCESS"; return 0; fi
     if ping -c 1 -W 2 "1.1.1.1" >/dev/null 2>&1; then log "Retry ping to 1.1.1.1: SUCCESS"; return 0; fi
-    
     log "Global ping checks: FAILED"
     return 1
 }
 
-# --- STRICT DUAL-WAN CHECK (Interface Specific) ---
 check_wan() {
     local logical_if="$1"
     log "Checking interface: [$logical_if]"
     
-    # 1. Ask MultiWAN Manager (mwan3) memory cache (Case Insensitive)
     if [ -n "$MWAN_STATUS" ]; then
         if echo "$MWAN_STATUS" | grep -qi "interface $logical_if is online"; then
-            log " -> mwan3 reports [$logical_if] is ONLINE. (Skipping manual ping)"
+            log " -> mwan3 reports [$logical_if] is ONLINE."
             return 0
         fi
-        
-        # If mwan3 knows about this interface but it's offline, trust it completely.
         if echo "$MWAN_STATUS" | grep -qi "interface $logical_if is"; then
-            log " -> mwan3 reports [$logical_if] is OFFLINE. (Skipping manual ping)"
+            log " -> mwan3 reports [$logical_if] is OFFLINE."
             return 1
         fi
     fi
     
-    # 2. Fallback to manual ping ONLY if mwan3 is NOT managing this interface
     local phys_dev="$logical_if"
     if [ ! -d "/sys/class/net/$logical_if" ]; then
         phys_dev=$(ubus call network.interface.$logical_if status 2>/dev/null | jsonfilter -e '@.l3_device' 2>/dev/null)
@@ -334,33 +354,25 @@ check_wan() {
     fi
     
     if [ -n "$phys_dev" ] && [ -d "/sys/class/net/$phys_dev" ]; then
-        log " -> Physical device resolved as [$phys_dev]. Executing manual ping test..."
+        log " -> Executing manual ping test via [$phys_dev]..."
+        if ping -c 1 -W 2 -I "$phys_dev" "1.1.1.1" >/dev/null 2>&1; then log " -> Ping 1.1.1.1: SUCCESS"; return 0; fi
+        if ping -c 1 -W 2 -I "$phys_dev" "8.8.8.8" >/dev/null 2>&1; then log " -> Ping 8.8.8.8: SUCCESS"; return 0; fi
         
-        # Pass 1
-        if ping -c 1 -W 2 -I "$phys_dev" "1.1.1.1" >/dev/null 2>&1; then log " -> Ping 1.1.1.1 via [$phys_dev]: SUCCESS"; return 0; fi
-        if ping -c 1 -W 2 -I "$phys_dev" "8.8.8.8" >/dev/null 2>&1; then log " -> Ping 8.8.8.8 via [$phys_dev]: SUCCESS"; return 0; fi
-        
-        # Micro-drop protection
         log " -> Pass 1 failed. Waiting 2s for micro-drop recovery..."
         sleep 2
         
-        # Pass 2
-        if ping -c 1 -W 2 -I "$phys_dev" "9.9.9.9" >/dev/null 2>&1; then log " -> Retry Ping 9.9.9.9 via [$phys_dev]: SUCCESS"; return 0; fi
-        if ping -c 1 -W 2 -I "$phys_dev" "1.1.1.1" >/dev/null 2>&1; then log " -> Retry Ping 1.1.1.1 via [$phys_dev]: SUCCESS"; return 0; fi
-        
+        if ping -c 1 -W 2 -I "$phys_dev" "9.9.9.9" >/dev/null 2>&1; then log " -> Retry Ping 9.9.9.9: SUCCESS"; return 0; fi
+        if ping -c 1 -W 2 -I "$phys_dev" "1.1.1.1" >/dev/null 2>&1; then log " -> Retry Ping 1.1.1.1: SUCCESS"; return 0; fi
         log " -> Ping checks via [$phys_dev]: FAILED"
     else
-        log " -> Could not resolve physical device for [$logical_if]. Attempting generic ping fallback..."
-        if ping -c 1 -W 2 "1.1.1.1" >/dev/null 2>&1; then log " -> Generic fallback ping: SUCCESS"; return 0; fi
+        log " -> Could not resolve physical device. Attempting generic fallback..."
+        if ping -c 1 -W 2 "1.1.1.1" >/dev/null 2>&1; then log " -> Generic ping: SUCCESS"; return 0; fi
     fi
-    
-    log " -> Interface [$logical_if] determined to be OFFLINE."
     return 1
 }
 
 if [ "$ENABLE_WARN" -eq 1 ]; then
-    PORTS="wan lan1 lan2 lan3 lan4"
-    for port in $PORTS; do
+    for port in wan lan1 lan2 lan3 lan4; do
         if [ -d "/sys/class/net/$port" ]; then
             SPEED=$(cat "/sys/class/net/$port/speed" 2>/dev/null)
             OPERSTATE=$(cat "/sys/class/net/$port/operstate" 2>/dev/null)
@@ -412,66 +424,44 @@ else
     fi
 fi
 
-# --- STATE MEMORY: Only update hardware if the state actually changed ---
-STATE_FILE="/tmp/router_led_state"
-NEW_STATE="${TARGET_COLOR}_${TARGET_MODE}"
-OLD_STATE=$(cat "$STATE_FILE" 2>/dev/null)
+# --- ENFORCE HARDWARE STATE ---
+log "Enforcing hardware LED state: [${TARGET_COLOR}_${TARGET_MODE}]"
+for c in blue green red; do
+    echo none > "/sys/class/leds/$c:status/trigger" 2>/dev/null
+    echo 0 > "/sys/class/leds/$c:status/brightness" 2>/dev/null
+done
+set_led "$TARGET_COLOR" "$TARGET_MODE"
+log "Hardware LEDs updated successfully."
 
-if [ "$NEW_STATE" != "$OLD_STATE" ]; then
-    log "State Change Detected: [$OLD_STATE] -> [$NEW_STATE]. Updating hardware LEDs..."
-    for c in blue green red; do
-        echo none > "/sys/class/leds/$c:status/trigger" 2>/dev/null
-        echo 0 > "/sys/class/leds/$c:status/brightness" 2>/dev/null
-    done
-    
-    set_led "$TARGET_COLOR" "$TARGET_MODE"
-    echo "$NEW_STATE" > "$STATE_FILE"
-    log "Hardware LEDs updated successfully."
-else
-    log "State Unchanged: [$NEW_STATE]. Hardware LEDs skipped."
-fi
 EOF
 
-# 4. Set Permissions
 chmod +x "$SCRIPT_PATH"
 echo "Set $SCRIPT_PATH as executable."
 
-# 5. Apply Crontab Entries
-echo "Configuring cron schedules (2x per minute)..."
 TMP_CRON="/tmp/led_cron_tmp"
-
-# Export current cron, stripping out old LED monitor entries
 crontab -l 2>/dev/null | \
   sed '/# --- BEGIN LED MONITOR ---/,/# --- END LED MONITOR ---/d' | \
   grep -v "$SCRIPT_PATH" > "$TMP_CRON"
 
-# Inject PATH securely if it does not already exist
 if ! grep -q "^PATH=" "$TMP_CRON"; then
     echo "PATH=/usr/sbin:/usr/bin:/sbin:/bin" > "${TMP_CRON}_new"
     cat "$TMP_CRON" >> "${TMP_CRON}_new"
     mv "${TMP_CRON}_new" "$TMP_CRON"
-    echo "-> Explicit PATH environment variable injected into crontab."
 fi
 
-# Append schedules using standard /usr/bin/timeout if standard timeout is missing
-TIMEOUT_CMD="timeout"
-if [ -x "/usr/bin/timeout" ]; then
-    TIMEOUT_CMD="/usr/bin/timeout"
-fi
-
+# Clean native crontab execution
 echo "# --- BEGIN LED MONITOR ---" >> "$TMP_CRON"
-echo "* * * * * $TIMEOUT_CMD 25 /bin/sh $SCRIPT_PATH >/dev/null 2>&1" >> "$TMP_CRON"
-echo "* * * * * sleep 30 && $TIMEOUT_CMD 25 /bin/sh $SCRIPT_PATH >/dev/null 2>&1" >> "$TMP_CRON"
+echo "* * * * * /bin/sh $SCRIPT_PATH >/dev/null 2>&1" >> "$TMP_CRON"
+echo "* * * * * sleep 30 && /bin/sh $SCRIPT_PATH >/dev/null 2>&1" >> "$TMP_CRON"
 echo "# --- END LED MONITOR ---" >> "$TMP_CRON"
 
 crontab "$TMP_CRON"
 rm "$TMP_CRON"
-
-if [ -x "/etc/init.d/cron" ]; then
-    /etc/init.d/cron restart >/dev/null 2>&1
-fi
+/etc/init.d/cron restart >/dev/null 2>&1
 
 /bin/sh "$SCRIPT_PATH" &
 
-echo "Installation complete! The script is now safely monitoring your connection every 30 seconds."
+echo "Installation complete! The script is safely monitoring your connection using native processes."
+echo "====================================================================="
 echo "You can check the logs at any time by running: cat ${SCRIPT_PATH}.log"
+echo "====================================================================="
