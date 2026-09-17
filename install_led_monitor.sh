@@ -1,11 +1,50 @@
 #!/bin/sh
 
+# Ensure the installer itself has the correct PATH to find opkg, apk, and core utilities
+export PATH="/usr/sbin:/usr/bin:/sbin:/bin:$PATH"
+
 echo "Starting LED Status Monitor Installation..."
 
 # Change directory to /root
 cd /root || { echo "Failed to change directory to /root. Exiting."; exit 1; }
 echo "Working directory changed to $(pwd)"
 echo ""
+
+# ==========================================
+# 1. PRE-FLIGHT PACKAGE VERIFICATION
+# ==========================================
+echo "Verifying required packages..."
+if ! command -v timeout > /dev/null 2>&1 && [ ! -x "/usr/bin/timeout" ]; then
+    echo "-> 'timeout' utility is missing. Attempting to install 'coreutils-timeout'..."
+    echo "--- Package Manager Output ---"
+    
+    if command -v opkg > /dev/null 2>&1; then
+        opkg update
+        opkg install coreutils-timeout
+    elif command -v apk > /dev/null 2>&1; then
+        apk update
+        apk add coreutils-timeout
+    fi
+    
+    echo "------------------------------"
+    # Refresh the terminal's command cache so it sees the newly installed binary
+    hash -r 2>/dev/null
+fi
+
+# Strict validation check
+if ! command -v timeout > /dev/null 2>&1 && [ ! -x "/usr/bin/timeout" ]; then
+    echo ""
+    echo "=========================================="
+    echo " CRITICAL ERROR: Package Installation Failed"
+    echo "=========================================="
+    echo "The script requires the 'timeout' utility."
+    echo "Please check the package manager output above for errors."
+    echo "Aborting installation to protect router stability."
+    exit 1
+else
+    echo "-> All required packages are present and verified."
+    echo ""
+fi
 
 # Strict Color Prompt Helper Function
 prompt_color() {
@@ -161,20 +200,12 @@ done
 uci commit system
 /etc/init.d/led reload >/dev/null 2>&1
 
-# 3. Install Dependencies
-if command -v opkg > /dev/null 2>&1; then
-    opkg update >/dev/null 2>&1
-    opkg install coreutils-timeout >/dev/null 2>&1
-elif command -v apk > /dev/null 2>&1; then
-    apk update >/dev/null 2>&1
-    apk add coreutils >/dev/null 2>&1
-fi
-
-# 4. Write the script payload
+# 3. Write the script payload
 echo "Writing payload to $SCRIPT_PATH..."
 
 cat << EOF > "$SCRIPT_PATH"
 #!/bin/sh
+export PATH="/usr/sbin:/usr/bin:/sbin:/bin:\$PATH"
 # --- User Configured Variables ---
 MONITOR_MODE="${MONITOR_MODE}"
 WAN1_NAME="${WAN1_NAME}"
@@ -402,21 +433,36 @@ else
 fi
 EOF
 
-# 5. Set Permissions
+# 4. Set Permissions
 chmod +x "$SCRIPT_PATH"
 echo "Set $SCRIPT_PATH as executable."
 
-# 6. Apply Crontab Entries
+# 5. Apply Crontab Entries
 echo "Configuring cron schedules (2x per minute)..."
 TMP_CRON="/tmp/led_cron_tmp"
 
+# Export current cron, stripping out old LED monitor entries
 crontab -l 2>/dev/null | \
   sed '/# --- BEGIN LED MONITOR ---/,/# --- END LED MONITOR ---/d' | \
   grep -v "$SCRIPT_PATH" > "$TMP_CRON"
 
+# Inject PATH securely if it does not already exist
+if ! grep -q "^PATH=" "$TMP_CRON"; then
+    echo "PATH=/usr/sbin:/usr/bin:/sbin:/bin" > "${TMP_CRON}_new"
+    cat "$TMP_CRON" >> "${TMP_CRON}_new"
+    mv "${TMP_CRON}_new" "$TMP_CRON"
+    echo "-> Explicit PATH environment variable injected into crontab."
+fi
+
+# Append schedules using standard /usr/bin/timeout if standard timeout is missing
+TIMEOUT_CMD="timeout"
+if [ -x "/usr/bin/timeout" ]; then
+    TIMEOUT_CMD="/usr/bin/timeout"
+fi
+
 echo "# --- BEGIN LED MONITOR ---" >> "$TMP_CRON"
-echo "* * * * * timeout 25 /bin/sh $SCRIPT_PATH >/dev/null 2>&1" >> "$TMP_CRON"
-echo "* * * * * sleep 30 && timeout 25 /bin/sh $SCRIPT_PATH >/dev/null 2>&1" >> "$TMP_CRON"
+echo "* * * * * $TIMEOUT_CMD 25 /bin/sh $SCRIPT_PATH >/dev/null 2>&1" >> "$TMP_CRON"
+echo "* * * * * sleep 30 && $TIMEOUT_CMD 25 /bin/sh $SCRIPT_PATH >/dev/null 2>&1" >> "$TMP_CRON"
 echo "# --- END LED MONITOR ---" >> "$TMP_CRON"
 
 crontab "$TMP_CRON"
@@ -429,4 +475,6 @@ fi
 /bin/sh "$SCRIPT_PATH" &
 
 echo "Installation complete! The script is now safely monitoring your connection every 30 seconds."
+echo "====================================================================="
 echo "You can check the logs at any time by running: cat ${SCRIPT_PATH}.log"
+echo "====================================================================="
